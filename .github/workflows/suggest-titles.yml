@@ -1,0 +1,45 @@
+name: Suggest Zendesk Ticket Titles
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_tickets:
+        description: "Maximum number of tickets to scan"
+        required: false
+        default: "50"
+        type: string
+
+jobs:
+  suggest-titles:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ticket title suggester
+        env:
+          ZENDESK_SUBDOMAIN: ${{ secrets.ZENDESK_SUBDOMAIN }}
+          ZENDESK_EMAIL: ${{ secrets.ZENDESK_EMAIL }}
+          ZENDESK_API_TOKEN: ${{ secrets.ZENDESK_API_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MAX_TICKETS: ${{ inputs.max_tickets }}
+          OUTPUT_FILE: suggestions.json
+        run: python ticket_title_suggester.py
+
+      - name: Upload suggestions report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: title-suggestions-${{ github.run_id }}
+          path: suggestions.json
+          retention-days: 30
