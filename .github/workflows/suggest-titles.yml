@@ -35,7 +35,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MAX_TICKETS: ${{ inputs.max_tickets }}
           OUTPUT_FILE: suggestions.json
-        run: python ticket_title_suggester.py
+          run: python ticket_title_suggester.py
 
       - name: Upload suggestions report
         if: always()
