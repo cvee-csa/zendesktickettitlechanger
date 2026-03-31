@@ -122,6 +122,35 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
     return decorator
 
 
+
+# ---------------------------------------------------------------------------
+# Claude API limit detection
+# ---------------------------------------------------------------------------
+
+# Error messages from the Anthropic API that indicate a non-retryable billing
+# or token limit problem.  When one of these is detected the script stops
+# early instead of burning through every remaining ticket.
+CLAUDE_LIMIT_PATTERNS = [
+    "credit balance is too low",
+    "monthly spend limit",
+    "rate limit exceeded",
+    "token limit",
+    "billing",
+    "exceeded your current quota",
+    "insufficient_quota",
+]
+
+
+class ClaudeTokenLimitError(Exception):
+    """Raised when the Claude API reports a billing or token limit issue."""
+    pass
+
+
+def is_claude_limit_error(error: anthropic.APIError) -> bool:
+    """Check whether an Anthropic API error indicates a token/credit limit."""
+    error_str = str(error).lower()
+    return any(pattern in error_str for pattern in CLAUDE_LIMIT_PATTERNS)
+
 # ---------------------------------------------------------------------------
 # Zendesk helpers
 # ---------------------------------------------------------------------------
@@ -281,6 +310,9 @@ Additional comments:
             return {"suggested_title": validated, "status": "Suggestion", "reason": "Title could be more descriptive"}
         return {"suggested_title": "", "status": "Keep Current", "reason": "Suggestion failed validation"}
     except anthropic.APIError as e:
+        if is_claude_limit_error(e):
+            logger.error("Claude API limit reached for ticket #%s: %s", ticket["id"], e)
+            raise ClaudeTokenLimitError(str(e))
         logger.error("Claude API error for ticket #%s: %s", ticket["id"], e)
         return {"suggested_title": "", "status": "Error", "reason": str(e)[:120]}
 
@@ -335,6 +367,7 @@ def write_csv_report(rows: list[dict], output_path: str, run_meta: dict):
         writer.writerow(["Suggestions Made", run_meta["suggestions_made"]])
         writer.writerow(["Titles Kept", run_meta["titles_kept"]])
         writer.writerow(["Errors", run_meta["errors"]])
+        writer.writerow(["Skipped (API Limit)", run_meta.get("skipped", 0)])
         writer.writerow(["PII Redaction", "Enabled"])
         writer.writerow(["Mode", "Log Only"])
         writer.writerow([])  # blank separator row
@@ -417,7 +450,35 @@ def main():
             })
             continue
 
-        result = suggest_title(client, ticket, comments)
+        try:
+            result = suggest_title(client, ticket, comments)
+        except ClaudeTokenLimitError as e:
+            logger.error("=" * 60)
+            logger.error("CLAUDE API LIMIT REACHED — stopping early.")
+            logger.error("Reason: %s", e)
+            logger.error("Processed %d/%d tickets before limit was hit.", i - 1, len(tickets))
+            logger.error("Add credits at https://console.anthropic.com/settings/billing")
+            logger.error("=" * 60)
+            # Mark remaining tickets (including this one) as skipped
+            for remaining_ticket in tickets[i - 1:]:
+                rt_id = remaining_ticket["id"]
+                rt_title = remaining_ticket.get("subject", remaining_ticket.get("raw_subject", ""))
+                rt_url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/agent/tickets/{rt_id}"
+                report_rows.append({
+                    "Ticket #": rt_id,
+                    "Status": "Skipped",
+                    "Current Title": rt_title,
+                    "Suggested Title": "",
+                    "Recommendation": "Re-run After Adding Credits",
+                    "Reason": "Claude API limit reached",
+                    "Ticket URL": rt_url,
+                    "Ticket Status": remaining_ticket.get("status", "").capitalize(),
+                    "Priority": (remaining_ticket.get("priority", "") or "").capitalize(),
+                    "Created": format_date(remaining_ticket.get("created_at", "")),
+                    "Last Updated": format_date(remaining_ticket.get("updated_at", "")),
+                })
+            break
+
         suggested_title = result["suggested_title"]
         status = result["status"]
         reason = result["reason"]
@@ -453,10 +514,12 @@ def main():
     print("\n" + "=" * 80)
     print(f"TITLE SUGGESTION REPORT \u2014 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
+    skipped = sum(1 for r in report_rows if r["Status"] == "Skipped")
     print(f"Tickets scanned: {len(tickets)}")
     print(f"Suggestions made: {suggestion_count}")
     print(f"Titles kept: {keep_count}")
     print(f"Errors encountered: {errors}")
+    print(f"Skipped (API limit): {skipped}")
     print(f"PII redaction: enabled")
     print("=" * 80)
 
@@ -475,6 +538,7 @@ def main():
         "suggestions_made": suggestion_count,
         "titles_kept": keep_count,
         "errors": errors,
+        "skipped": skipped,
     }
 
     # Write CSV report
@@ -484,10 +548,12 @@ def main():
     if suggestion_count == 0:
         logger.info("All ticket titles look good \u2014 nothing to suggest!")
 
-    # Exit with error code if too many failures
-    if errors > 0 and errors == len(tickets):
+    # Exit with error code only if real errors (not token limit skips)
+    if errors > 0 and errors == len(tickets) and skipped == 0:
         logger.error("All tickets failed to process. Exiting with error.")
         sys.exit(1)
+    elif skipped > 0:
+        logger.warning("Run completed partially: %d tickets skipped due to Claude API limit.", skipped)
 
 
 if __name__ == "__main__":
