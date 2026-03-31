@@ -29,10 +29,10 @@ import anthropic
 # Configuration
 # ---------------------------------------------------------------------------
 
-ZENDESK_SUBDOMAIN = os.environ.get("ZENDESK_SUBDOMAIN")          # e.g. "mycompany"
-ZENDESK_EMAIL = os.environ.get("ZENDESK_EMAIL")                  # e.g. "agent@company.com"
-ZENDESK_API_TOKEN = os.environ.get("ZENDESK_API_TOKEN")          # Zendesk API token
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")           # Claude API key
+ZENDESK_SUBDOMAIN = (os.environ.get("ZENDESK_SUBDOMAIN") or "").strip()
+ZENDESK_EMAIL = (os.environ.get("ZENDESK_EMAIL") or "").strip()
+ZENDESK_API_TOKEN = (os.environ.get("ZENDESK_API_TOKEN") or "").strip()
+ANTHROPIC_API_KEY = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
 
 ZENDESK_BASE_URL = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2"
 
