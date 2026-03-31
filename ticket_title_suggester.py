@@ -26,6 +26,14 @@ from functools import wraps
 import requests
 import anthropic
 
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+    GDRIVE_AVAILABLE = True
+except ImportError:
+    GDRIVE_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -34,6 +42,10 @@ ZENDESK_SUBDOMAIN = (os.environ.get("ZENDESK_SUBDOMAIN") or "").strip()
 ZENDESK_EMAIL = (os.environ.get("ZENDESK_EMAIL") or "").strip()
 ZENDESK_API_TOKEN = (os.environ.get("ZENDESK_API_TOKEN") or "").strip()
 ANTHROPIC_API_KEY = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+
+# Google Drive upload (optional)
+GDRIVE_SA_JSON   = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")  # full JSON key string
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")            # folder or Shared Drive folder ID
 
 ZENDESK_BASE_URL = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2"
 
@@ -382,6 +394,76 @@ def write_csv_report(rows: list[dict], output_path: str, run_meta: dict):
     logger.info("CSV report written to %s (%d data rows)", output_path, len(rows))
 
 
+
+# -- Google Drive upload -----------------------------------------------------
+
+def upload_to_gdrive(file_path):
+    """
+    Upload file_path to Google Drive (works with both My Drive and Shared Drives).
+    Requires GDRIVE_SERVICE_ACCOUNT_JSON and GDRIVE_FOLDER_ID env vars.
+    Skips silently if either is missing or google-auth libs are not installed.
+    """
+    if not GDRIVE_AVAILABLE:
+        print("  [Drive] google-auth libraries not installed -- skipping upload.")
+        return
+    if not GDRIVE_SA_JSON or not GDRIVE_FOLDER_ID:
+        print("  [Drive] GDRIVE_SERVICE_ACCOUNT_JSON or GDRIVE_FOLDER_ID not set -- skipping.")
+        return
+
+    try:
+        sa_json = GDRIVE_SA_JSON.strip()
+        if not sa_json:
+            print("  [Drive] GDRIVE_SERVICE_ACCOUNT_JSON is blank after stripping whitespace -- skipping.")
+            return
+        creds_info = json.loads(sa_json)
+
+        # Support both service account keys and OAuth user credentials
+        if creds_info.get("type") == "service_account":
+            creds = service_account.Credentials.from_service_account_info(
+                creds_info,
+                scopes=["https://www.googleapis.com/auth/drive"],
+            )
+        else:
+            # OAuth user credentials (from generate_oauth_token.py / InstalledAppFlow)
+            from google.oauth2.credentials import Credentials
+            creds = Credentials(
+                token=creds_info.get("token"),
+                refresh_token=creds_info["refresh_token"],
+                token_uri=creds_info.get("token_uri", "https://oauth2.googleapis.com/token"),
+                client_id=creds_info["client_id"],
+                client_secret=creds_info["client_secret"],
+                scopes=creds_info.get("scopes"),
+            )
+
+        service = build("drive", "v3", credentials=creds)
+
+        file_name = os.path.basename(file_path)
+        file_metadata = {"name": file_name, "parents": [GDRIVE_FOLDER_ID]}
+        media = MediaFileUpload(
+            file_path,
+            mimetype="text/csv",
+            resumable=True,
+        )
+
+        # supportsAllDrives=True makes it work for both Shared Drives and My Drive
+        uploaded = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id, name, webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+
+        print(f"  [Drive] Uploaded: {uploaded['name']}")
+        print(f"  [Drive] View at : {uploaded.get('webViewLink', '(no link)')}")
+
+    except json.JSONDecodeError as e:
+        print(f"  [Drive] GDRIVE_SERVICE_ACCOUNT_JSON is not valid JSON: {e}")
+        print(f"  [Drive] Secret starts with: {repr(GDRIVE_SA_JSON[:80])}")
+        print("  [Drive] Check that the secret contains the raw JSON (not base64 or a file path).")
+    except Exception as e:
+        print(f"  [Drive] Upload failed: {e}")
+
+
 def main():
     # Validate required env vars
     missing = []
@@ -544,6 +626,9 @@ def main():
     # Write CSV report
     csv_path = os.environ.get("OUTPUT_FILE", "title_suggestions.csv")
     write_csv_report(report_rows, csv_path, run_meta)
+
+    # Upload CSV to Google Drive (skips silently if not configured)
+    upload_to_gdrive(csv_path)
 
     if suggestion_count == 0:
         logger.info("All ticket titles look good \u2014 nothing to suggest!")
