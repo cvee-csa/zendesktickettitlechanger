@@ -34,13 +34,13 @@ jobs:
           ZENDESK_API_TOKEN: ${{ secrets.ZENDESK_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MAX_TICKETS: ${{ inputs.max_tickets }}
-          OUTPUT_FILE: suggestions.json
+          OUTPUT_FILE: title_suggestions.csv
         run: python ticket_title_suggester.py
 
       - name: Upload suggestions report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: title-suggestions-${{ github.run_id }}
-          path: suggestions.json
+          name: title-suggestions-report-${{ github.run_id }}
+          path: title_suggestions.csv
           retention-days: 30
