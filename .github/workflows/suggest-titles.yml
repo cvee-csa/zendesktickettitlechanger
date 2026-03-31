@@ -35,6 +35,8 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MAX_TICKETS: ${{ inputs.max_tickets }}
           OUTPUT_FILE: title_suggestions.csv
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: python ticket_title_suggester.py
 
       - name: Upload suggestions report
@@ -44,16 +46,3 @@ jobs:
           name: title-suggestions-report-${{ github.run_id }}
           path: title_suggestions.csv
           retention-days: 30
-
-      - name: Upload CSV to Google Drive
-        if: success() && hashFiles('title_suggestions.csv') != ''
-        env:
-          GDRIVE_CREDENTIALS_JSON: ${{ secrets.GDRIVE_CREDENTIALS_JSON }}
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-        run: |
-          if [ -z "$GDRIVE_CREDENTIALS_JSON" ] || [ -z "$GDRIVE_FOLDER_ID" ]; then
-            echo "Google Drive secrets not configured - skipping upload"
-            echo "To enable, add GDRIVE_CREDENTIALS_JSON and GDRIVE_FOLDER_ID secrets"
-          else
-            python upload_to_drive.py title_suggestions.csv
-          fi
