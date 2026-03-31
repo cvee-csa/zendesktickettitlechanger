@@ -13,6 +13,7 @@ Guardrails:
 - Title length and content validation on suggestions
 """
 
+import csv
 import os
 import re
 import sys
@@ -232,8 +233,14 @@ def validate_suggestion(suggestion: str, ticket_id: int) -> str | None:
     return suggestion
 
 
-def suggest_title(client: anthropic.Anthropic, ticket: dict, comments: list[dict]) -> str | None:
-    """Use Claude to suggest a better title for the given ticket."""
+def suggest_title(client: anthropic.Anthropic, ticket: dict, comments: list[dict]) -> dict:
+    """Use Claude to suggest a better title for the given ticket.
+
+    Returns a dict with keys:
+        suggested_title: str or empty string
+        status: "Suggestion" | "Keep Current" | "Error"
+        reason: short explanation
+    """
     current_title = ticket.get("subject", ticket.get("raw_subject", ""))
     description = ticket.get("description", "")
 
@@ -268,16 +275,78 @@ Additional comments:
         )
         suggestion = response.content[0].text.strip()
         if suggestion.upper() == "KEEP":
-            return None
-        return validate_suggestion(suggestion, ticket["id"])
+            return {"suggested_title": "", "status": "Keep Current", "reason": "Title is already clear and descriptive"}
+        validated = validate_suggestion(suggestion, ticket["id"])
+        if validated:
+            return {"suggested_title": validated, "status": "Suggestion", "reason": "Title could be more descriptive"}
+        return {"suggested_title": "", "status": "Keep Current", "reason": "Suggestion failed validation"}
     except anthropic.APIError as e:
         logger.error("Claude API error for ticket #%s: %s", ticket["id"], e)
-        return None
+        return {"suggested_title": "", "status": "Error", "reason": str(e)[:120]}
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+
+def format_date(iso_string: str | None) -> str:
+    """Convert an ISO date string to MM/DD/YYYY format."""
+    if not iso_string:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_string.replace("Z", "+00:00"))
+        return dt.strftime("%m/%d/%Y")
+    except (ValueError, TypeError):
+        return str(iso_string)[:10]
+
+
+# ---------------------------------------------------------------------------
+# CSV Report columns (inspired by ESC/RARC report structure)
+# ---------------------------------------------------------------------------
+
+CSV_COLUMNS = [
+    "Ticket #",
+    "Status",
+    "Current Title",
+    "Suggested Title",
+    "Recommendation",
+    "Reason",
+    "Ticket URL",
+    "Ticket Status",
+    "Priority",
+    "Created",
+    "Last Updated",
+]
+
+
+def write_csv_report(rows: list[dict], output_path: str, run_meta: dict):
+    """Write the title suggestion report as a CSV file.
+
+    Includes a summary header block followed by one row per ticket.
+    """
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+
+        # --- Summary header block (mirrors the ESC/RARC report style) ---
+        writer.writerow(["Title Suggestion Report"])
+        writer.writerow(["Run Date", run_meta["run_date"]])
+        writer.writerow(["Tickets Scanned", run_meta["tickets_scanned"]])
+        writer.writerow(["Suggestions Made", run_meta["suggestions_made"]])
+        writer.writerow(["Titles Kept", run_meta["titles_kept"]])
+        writer.writerow(["Errors", run_meta["errors"]])
+        writer.writerow(["PII Redaction", "Enabled"])
+        writer.writerow(["Mode", "Log Only"])
+        writer.writerow([])  # blank separator row
+
+        # --- Column headers ---
+        writer.writerow(CSV_COLUMNS)
+
+        # --- Data rows ---
+        for row in rows:
+            writer.writerow([row.get(col, "") for col in CSV_COLUMNS])
+
+    logger.info("CSV report written to %s (%d data rows)", output_path, len(rows))
 
 
 def main():
@@ -312,71 +381,108 @@ def main():
 
     logger.info("Found %d open tickets to analyze.", len(tickets))
 
-    suggestions = []
+    report_rows: list[dict] = []
+    suggestion_count = 0
+    keep_count = 0
     errors = 0
 
     for i, ticket in enumerate(tickets, 1):
         ticket_id = ticket["id"]
         current_title = ticket.get("subject", ticket.get("raw_subject", ""))
+        ticket_status = ticket.get("status", "")
+        ticket_priority = ticket.get("priority", "") or ""
+        created_at = ticket.get("created_at", "")
+        updated_at = ticket.get("updated_at", "")
+        ticket_url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/agent/tickets/{ticket_id}"
+
         logger.info("[%d/%d] Analyzing ticket #%s: %s", i, len(tickets), ticket_id, current_title)
 
         try:
             comments = fetch_ticket_comments(ticket_id)
         except requests.RequestException as e:
-            logger.error("  Failed to fetch comments for ticket #%s: %s", ticket_id, e)
+            logger.error("  \u2192 Failed to fetch comments for ticket #%s: %s", ticket_id, e)
             errors += 1
+            report_rows.append({
+                "Ticket #": ticket_id,
+                "Status": "Error",
+                "Current Title": current_title,
+                "Suggested Title": "",
+                "Recommendation": "Review Manually",
+                "Reason": f"Failed to fetch comments: {str(e)[:80]}",
+                "Ticket URL": ticket_url,
+                "Ticket Status": ticket_status.capitalize(),
+                "Priority": ticket_priority.capitalize(),
+                "Created": format_date(created_at),
+                "Last Updated": format_date(updated_at),
+            })
             continue
 
-        new_title = suggest_title(client, ticket, comments)
+        result = suggest_title(client, ticket, comments)
+        suggested_title = result["suggested_title"]
+        status = result["status"]
+        reason = result["reason"]
 
-        if new_title:
-            suggestions.append({
-                "ticket_id": ticket_id,
-                "ticket_url": f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/agent/tickets/{ticket_id}",
-                "current_title": current_title,
-                "suggested_title": new_title,
-            })
-            logger.info("  Suggested: %s", new_title)
+        if status == "Suggestion":
+            suggestion_count += 1
+            recommendation = "Update Title"
+            logger.info("  \u2192 Suggested: %s", suggested_title)
+        elif status == "Error":
+            errors += 1
+            recommendation = "Review Manually"
+            logger.info("  \u2192 Error analyzing title.")
         else:
-            logger.info("  Title is fine, no change suggested.")
+            keep_count += 1
+            recommendation = "No Action Needed"
+            logger.info("  \u2192 Title is fine, no change suggested.")
 
-    # Print summary
+        report_rows.append({
+            "Ticket #": ticket_id,
+            "Status": status,
+            "Current Title": current_title,
+            "Suggested Title": suggested_title,
+            "Recommendation": recommendation,
+            "Reason": reason,
+            "Ticket URL": ticket_url,
+            "Ticket Status": ticket_status.capitalize(),
+            "Priority": ticket_priority.capitalize(),
+            "Created": format_date(created_at),
+            "Last Updated": format_date(updated_at),
+        })
+
+    # Print summary to stdout
     print("\n" + "=" * 80)
-    print(f"TITLE SUGGESTION REPORT -- {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"TITLE SUGGESTION REPORT \u2014 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
     print(f"Tickets scanned: {len(tickets)}")
-    print(f"Suggestions made: {len(suggestions)}")
+    print(f"Suggestions made: {suggestion_count}")
+    print(f"Titles kept: {keep_count}")
     print(f"Errors encountered: {errors}")
     print(f"PII redaction: enabled")
     print("=" * 80)
 
-    for s in suggestions:
-        print(f"\nTicket #{s['ticket_id']}  {s['ticket_url']}")
-        print(f"  Current:   {s['current_title']}")
-        print(f"  Suggested: {s['suggested_title']}")
+    for row in report_rows:
+        if row["Status"] == "Suggestion":
+            print(f"\nTicket #{row['Ticket #']}  {row['Ticket URL']}")
+            print(f"  Current:   {row['Current Title']}")
+            print(f"  Suggested: {row['Suggested Title']}")
 
     print("\n" + "=" * 80)
 
-    # Also write JSON output for potential downstream use
-    output_path = os.environ.get("OUTPUT_FILE", "suggestions.json")
-    with open(output_path, "w") as f:
-        json.dump(
-            {
-                "run_date": datetime.now().isoformat(),
-                "tickets_scanned": len(tickets),
-                "suggestions_made": len(suggestions),
-                "errors": errors,
-                "pii_redaction": True,
-                "mode": "log_only",
-                "suggestions": suggestions,
-            },
-            f,
-            indent=2,
-        )
-    logger.info("JSON report written to %s", output_path)
+    # Build run metadata for the report header
+    run_meta = {
+        "run_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "tickets_scanned": len(tickets),
+        "suggestions_made": suggestion_count,
+        "titles_kept": keep_count,
+        "errors": errors,
+    }
 
-    if not suggestions:
-        logger.info("All ticket titles look good -- nothing to suggest!")
+    # Write CSV report
+    csv_path = os.environ.get("OUTPUT_FILE", "title_suggestions.csv")
+    write_csv_report(report_rows, csv_path, run_meta)
+
+    if suggestion_count == 0:
+        logger.info("All ticket titles look good \u2014 nothing to suggest!")
 
     # Exit with error code if too many failures
     if errors > 0 and errors == len(tickets):
@@ -386,4 +492,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
