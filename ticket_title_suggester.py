@@ -53,7 +53,7 @@ ZENDESK_BASE_URL = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2"
 MAX_TICKETS = int(os.environ.get("MAX_TICKETS", "50"))
 
 # Claude model to use
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
 # Rate limiting: seconds to wait between API calls
 ZENDESK_RATE_LIMIT_DELAY = float(os.environ.get("ZENDESK_RATE_LIMIT_DELAY", "0.5"))
@@ -173,12 +173,20 @@ def zendesk_auth():
     return (f"{ZENDESK_EMAIL}/token", ZENDESK_API_TOKEN)
 
 
-def handle_zendesk_rate_limit(response: requests.Response):
-    """Check for Zendesk 429 rate limit and wait if needed."""
+def handle_zendesk_rate_limit(response: requests.Response, attempt: int = 0):
+    """Check for Zendesk 429 rate limit or transient 5xx errors and wait if needed."""
     if response.status_code == 429:
         retry_after = int(response.headers.get("Retry-After", 60))
         logger.warning("Zendesk rate limit hit. Waiting %d seconds...", retry_after)
         time.sleep(retry_after)
+        return True
+    if response.status_code in (500, 502, 503, 504):
+        delay = 2 ** attempt
+        logger.warning(
+            "Zendesk returned %d. Retrying in %ds (attempt %d)...",
+            response.status_code, delay, attempt + 1,
+        )
+        time.sleep(delay)
         return True
     return False
 
@@ -193,10 +201,11 @@ def fetch_open_tickets() -> list[dict]:
 
     while url and len(tickets) < MAX_TICKETS:
         logger.info("Fetching tickets from: %s", url)
-        resp = requests.get(url, auth=zendesk_auth(), params=params, timeout=30)
-
-        if handle_zendesk_rate_limit(resp):
-            continue  # retry the same request
+        for attempt in range(MAX_RETRIES + 1):
+            resp = requests.get(url, auth=zendesk_auth(), params=params, timeout=30)
+            if handle_zendesk_rate_limit(resp, attempt):
+                continue  # retry the same request
+            break  # not a retryable status code
 
         resp.raise_for_status()
         data = resp.json()
@@ -212,12 +221,11 @@ def fetch_open_tickets() -> list[dict]:
 def fetch_ticket_comments(ticket_id: int) -> list[dict]:
     """Fetch the first few comments on a ticket to provide context."""
     url = f"{ZENDESK_BASE_URL}/tickets/{ticket_id}/comments.json"
-    resp = requests.get(url, auth=zendesk_auth(), params={"per_page": 5}, timeout=30)
-
-    if handle_zendesk_rate_limit(resp):
-        # Retry once after rate limit
-        time.sleep(int(resp.headers.get("Retry-After", 60)))
+    for attempt in range(MAX_RETRIES + 1):
         resp = requests.get(url, auth=zendesk_auth(), params={"per_page": 5}, timeout=30)
+        if handle_zendesk_rate_limit(resp, attempt):
+            continue  # retry on 429 or 5xx
+        break
 
     resp.raise_for_status()
     return resp.json().get("comments", [])
@@ -240,6 +248,19 @@ Rules:
 - Do not include any personal information (names, emails, account numbers) in the title.
 - If the current title is already clear and descriptive, respond with "KEEP" and nothing else.
 - Respond with ONLY the suggested title (or "KEEP"). No explanation, no quotes.
+
+Examples:
+
+Current title: "Help"
+Description: "I can't log into my CCAK dashboard. It says my session expired but I just logged in 5 minutes ago."
+Suggested title: CCAK dashboard login fails with session expiration error
+
+Current title: "Question about my account"
+Description: "I purchased CSA STAR certification last month and need to consolidate it with my other purchases under our company account."
+Suggested title: Consolidate CSA STAR certification purchase under company account
+
+Current title: "CSA STAR registry  - update request"
+Suggested title: KEEP
 """
 
 
