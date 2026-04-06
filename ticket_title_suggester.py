@@ -84,9 +84,9 @@ logger = logging.getLogger(__name__)
 
 PII_PATTERNS = [
     (re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"), "[EMAIL_REDACTED]"),
-    (re.compile(r"\b(\+?1?[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"), "[PHONE_REDACTED]"),
+    (re.compile(r"\b(\+?1?[-.\\s]?)?\(?\d{3}\)?[-.\\s]?\d{3}[-.\\s]?\d{4}\b"), "[PHONE_REDACTED]"),
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[SSN_REDACTED]"),
-    (re.compile(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b"), "[CC_REDACTED]"),
+    (re.compile(r"\b\d{4}[-\\s]?\d{4}[-\\s]?\d{4}[-\\s]?\d{4}\b"), "[CC_REDACTED]"),
     (re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"), "[IP_REDACTED]"),
 ]
 
@@ -97,6 +97,16 @@ def redact_pii(text: str) -> str:
     for pattern, replacement in PII_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
+
+
+def title_contains_pii(title: str) -> bool:
+    """Check if title contains PII patterns."""
+    if not title:
+        return False
+    for pattern, _ in PII_PATTERNS:
+        if pattern.search(title):
+            return True
+    return False
 
 
 def strip_html(text: str) -> str:
@@ -580,8 +590,27 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
     current_title = ticket.get("subject", ticket.get("raw_subject", ""))
     description = ticket.get("description", "")
 
-    # Check for automation/notification tickets first
+    # Check for PII in title FIRST
+    if title_contains_pii(current_title):
+        return {
+            "suggested_title": redact_pii(current_title),
+            "status": "PII in Title",
+            "reason": "Current title contains personal information (email/phone) that should be removed",
+        }
+
+    # Check for automation/notification tickets
     if is_automation_ticket(current_title, description):
+        # Try to extract product name from the original title
+        product_match = re.search(r"purchase notification for (.+)", current_title, re.IGNORECASE)
+        if product_match:
+            product_name = product_match.group(1).strip()
+            suggested = f"{product_name} — Purchase Notification"
+            return {
+                "suggested_title": suggested,
+                "status": "Suggestion",
+                "reason": "Title is from an automated/notification email — needs a human-readable subject",
+            }
+        
         # Try to build a better title from the content
         suggested = build_suggested_title(current_title, description, comments)
         reason = classify_vagueness_or_automation(current_title, description)
@@ -623,8 +652,8 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
 
     return {
         "suggested_title": "",
-        "status": "Keep Current",
-        "reason": "Could not generate a better title from ticket content",
+        "status": "Needs Manual Review",
+        "reason": "Title is vague but no automatic suggestion could be generated — manual review recommended",
     }
 
 
@@ -708,18 +737,20 @@ SUGGEST_FILL  = "E8F4E8";  ALT_SUGGEST  = "F0FAF0"
 KEEP_FILL     = "F5F5F5";  ALT_KEEP     = "FAFAFA"
 ERROR_FILL    = "FFE8E8";  ALT_ERROR    = "FFF0F0"
 SKIP_FILL     = "FFF9C4";  ALT_SKIP     = "FFFDE7"
+PII_FILL      = "FFF3E0";  ALT_PII      = "FFF8E8"
 LINK_COLOR    = "1155CC"
 SUGGEST_BADGE = "27AE60"
 KEEP_BADGE    = "7F8C8D"
 ERROR_BADGE   = "C0392B"
 SKIP_BADGE    = "F57F17"
+PII_BADGE     = "E65100"
 
 HEADERS = [
     "Ticket #", "Status", "Current Title", "Suggested Title",
-    "Recommendation", "Reason", "Ticket Status", "Priority",
+    "Recommendation", "Reason", "Ticket Status", "Requester",
     "Created", "Last Updated",
 ]
-WIDTHS = [10, 14, 44, 44, 18, 36, 12, 10, 13, 13]
+WIDTHS = [10, 14, 44, 44, 18, 36, 12, 20, 13, 13]
 
 
 def _border():
@@ -744,6 +775,10 @@ def _status_colors(status):
     elif status == "Error":
         return (ERROR_FILL, ALT_ERROR, ERROR_BADGE)
     elif status == "Skipped":
+        return (SKIP_FILL, ALT_SKIP, SKIP_BADGE)
+    elif status == "PII in Title":
+        return (PII_FILL, ALT_PII, PII_BADGE)
+    elif status == "Needs Manual Review":
         return (SKIP_FILL, ALT_SKIP, SKIP_BADGE)
     return (KEEP_FILL, ALT_KEEP, KEEP_BADGE)
 
@@ -839,8 +874,8 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
         # Col 7: Ticket Status
         _cell(ws, cur_row, 7, r.get("Ticket Status", ""), bg=bg, align="center")
 
-        # Col 8: Priority
-        _cell(ws, cur_row, 8, r.get("Priority", ""), bg=bg, align="center")
+        # Col 8: Requester
+        _cell(ws, cur_row, 8, r.get("Requester", ""), bg=bg, align="center")
 
         # Col 9: Created
         _cell(ws, cur_row, 9, r.get("Created", ""), bg=bg, align="center")
@@ -858,7 +893,7 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
     today_str = _now.strftime("%Y-%m-%d")
 
     es.merge_cells("A1:F1")
-    title_cell = es.cell(row=1, column=1, value=f"Title Suggestion Report \u2014 {today_str}")
+    title_cell = es.cell(row=1, column=1, value=f"Title Suggestion Report — {today_str}")
     title_cell.font = Font(name="Arial", bold=True, size=16, color="1F2D3D")
     title_cell.alignment = Alignment(horizontal="left", vertical="center")
     es.row_dimensions[1].height = 32
@@ -868,6 +903,7 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
         ("Tickets Scanned",  run_meta["tickets_scanned"],   "1F2D3D"),
         ("Suggestions Made", run_meta["suggestions_made"],  SUGGEST_BADGE),
         ("Titles Kept",      run_meta["titles_kept"],       KEEP_BADGE),
+        ("Manual Reviews",   run_meta.get("manual_reviews", 0), SKIP_BADGE),
         ("Errors",           run_meta["errors"],            ERROR_BADGE),
         ("PII Redaction",    "Enabled",                     "1F2D3D"),
         ("Mode",             "Rule-Based (no AI API)",      "1F2D3D"),
@@ -879,6 +915,39 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
         v = es.cell(row=row_num, column=2, value=val)
         v.font = Font(name="Arial", bold=True, size=13, color=color)
         v.alignment = Alignment(horizontal="left")
+        row_num += 1
+
+    # Breakdown stats
+    row_num += 1
+    es.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=2)
+    sec = es.cell(row=row_num, column=1, value="Issue Breakdown")
+    sec.font = Font(name="Arial", bold=True, size=12, color="1F2D3D")
+    sec.alignment = Alignment(horizontal="left", vertical="center")
+    row_num += 1
+
+    # Count automation tickets
+    automation_count = sum(1 for r in rows if "automated" in r.get("Reason", "").lower() or "auto-generated" in r.get("Reason", "").lower())
+    
+    # Count vague titles (Suggestion status but not automation, not PII)
+    vague_count = sum(1 for r in rows if r.get("Status") == "Suggestion" 
+                      and "automated" not in r.get("Reason", "").lower() 
+                      and "auto-generated" not in r.get("Reason", "").lower()
+                      and "personal information" not in r.get("Reason", "").lower())
+    
+    # Count PII in Title
+    pii_count = sum(1 for r in rows if r.get("Status") == "PII in Title")
+
+    breakdown_items = [
+        ("Automation Tickets", automation_count),
+        ("Vague Titles", vague_count),
+        ("PII in Title", pii_count),
+        ("Needs Manual Review", run_meta.get("manual_reviews", 0)),
+    ]
+    for label, val in breakdown_items:
+        es.cell(row=row_num, column=1, value=label).font = Font(
+            name="Arial", bold=True, size=10, color="333333")
+        v = es.cell(row=row_num, column=2, value=int(val))
+        v.font = Font(name="Arial", bold=True, size=11, color="666666")
         row_num += 1
 
     # Top suggestions table
@@ -902,7 +971,7 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
             es.column_dimensions[get_column_letter(ci)].width = w
         row_num += 1
 
-        for r in suggestions_only[:10]:
+        for r in suggestions_only:
             tid_cell = es.cell(row=row_num, column=1, value=r.get("Ticket #", ""))
             tid_url = r.get("Ticket URL", "")
             tid_cell.font = Font(name="Arial", color=LINK_COLOR, underline="single", size=11)
@@ -910,9 +979,9 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
                 tid_cell.hyperlink = tid_url
             tid_cell.border = _border()
 
-            es.cell(row=row_num, column=2, value=r.get("Current Title", "")[:60]).border = _border()
+            es.cell(row=row_num, column=2, value=r.get("Current Title", "")).border = _border()
 
-            sug_cell = es.cell(row=row_num, column=3, value=r.get("Suggested Title", "")[:60])
+            sug_cell = es.cell(row=row_num, column=3, value=r.get("Suggested Title", ""))
             sug_cell.font = Font(name="Arial", bold=True, color=SUGGEST_BADGE, size=11)
             sug_cell.border = _border()
 
@@ -922,7 +991,7 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
             row_num += 1
 
     wb.save(output_path)
-    logger.info("Spreadsheet saved \u2192 %s (%d data rows)", output_path, len(rows))
+    logger.info("Spreadsheet saved → %s (%d data rows)", output_path, len(rows))
 
 
 # -- Google Drive upload -----------------------------------------------------
@@ -1018,23 +1087,28 @@ def main():
     report_rows: list[dict] = []
     suggestion_count = 0
     keep_count = 0
+    manual_review_count = 0
     errors = 0
 
     for i, ticket in enumerate(tickets, 1):
         ticket_id = ticket["id"]
         current_title = ticket.get("subject", ticket.get("raw_subject", ""))
         ticket_status = ticket.get("status", "")
-        ticket_priority = ticket.get("priority", "") or ""
         created_at = ticket.get("created_at", "")
         updated_at = ticket.get("updated_at", "")
         ticket_url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/agent/tickets/{ticket_id}"
+
+        # Extract requester name
+        requester_name = ticket.get("via", {}).get("source", {}).get("from", {}).get("name", "")
+        if not requester_name:
+            requester_name = str(ticket.get("requester_id", ""))
 
         logger.info("[%d/%d] Analyzing ticket #%s: %s", i, len(tickets), ticket_id, current_title)
 
         try:
             comments = fetch_ticket_comments(ticket_id)
         except requests.RequestException as e:
-            logger.error("  \u2192 Failed to fetch comments for ticket #%s: %s", ticket_id, e)
+            logger.error("  → Failed to fetch comments for ticket #%s: %s", ticket_id, e)
             errors += 1
             report_rows.append({
                 "Ticket #": ticket_id,
@@ -1045,7 +1119,7 @@ def main():
                 "Reason": f"Failed to fetch comments: {str(e)[:80]}",
                 "Ticket URL": ticket_url,
                 "Ticket Status": ticket_status.capitalize(),
-                "Priority": ticket_priority.capitalize(),
+                "Requester": requester_name,
                 "Created": format_date(created_at),
                 "Last Updated": format_date(updated_at),
             })
@@ -1060,15 +1134,19 @@ def main():
         if status == "Suggestion":
             suggestion_count += 1
             recommendation = "Update Title"
-            logger.info("  \u2192 Suggested: %s", suggested_title if suggested_title else "(flag only — no auto-suggestion)")
+            logger.info("  → Suggested: %s", suggested_title if suggested_title else "(flag only — no auto-suggestion)")
+        elif status == "Needs Manual Review":
+            manual_review_count += 1
+            recommendation = "Review Manually"
+            logger.info("  → Needs manual review: vague title with no auto-suggestion")
         elif status == "Error":
             errors += 1
             recommendation = "Review Manually"
-            logger.info("  \u2192 Error analyzing title.")
+            logger.info("  → Error analyzing title.")
         else:
             keep_count += 1
             recommendation = "No Action Needed"
-            logger.info("  \u2192 Title is fine, no change suggested.")
+            logger.info("  → Title is fine, no change suggested.")
 
         report_rows.append({
             "Ticket #": ticket_id,
@@ -1079,18 +1157,19 @@ def main():
             "Reason": reason,
             "Ticket URL": ticket_url,
             "Ticket Status": ticket_status.capitalize(),
-            "Priority": ticket_priority.capitalize(),
+            "Requester": requester_name,
             "Created": format_date(created_at),
             "Last Updated": format_date(updated_at),
         })
 
     # Print summary
     print("\n" + "=" * 80)
-    print(f"TITLE SUGGESTION REPORT \u2014 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"TITLE SUGGESTION REPORT — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
     print(f"Tickets scanned: {len(tickets)}")
     print(f"Suggestions made: {suggestion_count}")
     print(f"Titles kept: {keep_count}")
+    print(f"Manual reviews needed: {manual_review_count}")
     print(f"Errors encountered: {errors}")
     print(f"Engine: Rule-based heuristics (no AI API)")
     print(f"PII redaction: enabled")
@@ -1110,6 +1189,7 @@ def main():
         "tickets_scanned": len(tickets),
         "suggestions_made": suggestion_count,
         "titles_kept": keep_count,
+        "manual_reviews": manual_review_count,
         "errors": errors,
     }
 
@@ -1117,8 +1197,8 @@ def main():
 
     upload_to_gdrive(REPORT_PATH)
 
-    if suggestion_count == 0:
-        logger.info("All ticket titles look good \u2014 nothing to suggest!")
+    if suggestion_count == 0 and manual_review_count == 0:
+        logger.info("All ticket titles look good — nothing to suggest!")
 
     if errors > 0 and errors == len(tickets):
         logger.error("All tickets failed to process. Exiting with error.")
