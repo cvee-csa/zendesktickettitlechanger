@@ -1,14 +1,16 @@
 """
-Zendesk Ticket Title Suggester
+Zendesk Ticket Title Suggester (Rule-Based)
 
-Queries Zendesk for open tickets, analyzes their content using the Claude API,
+Queries Zendesk for open tickets, analyzes their titles using heuristic rules,
 and suggests more meaningful titles based on ticket context.
 
+No external AI API required — uses keyword extraction and pattern matching.
+
 Guardrails:
-- Rate limiting for both Zendesk and Claude API calls
-- PII redaction before sending ticket content to Claude
+- Rate limiting for Zendesk API calls
+- PII redaction in suggestions
 - Retry logic with exponential backoff
-- Configurable max ticket cap to control costs
+- Configurable max ticket cap
 - Log-only mode by default (no ticket modifications)
 - Title length and content validation on suggestions
 """
@@ -21,9 +23,9 @@ import time
 import logging
 from datetime import datetime, timezone, timedelta
 from functools import wraps
+from collections import Counter
 
 import requests
-import anthropic
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -43,23 +45,18 @@ except ImportError:
 ZENDESK_SUBDOMAIN = (os.environ.get("ZENDESK_SUBDOMAIN") or "").strip()
 ZENDESK_EMAIL = (os.environ.get("ZENDESK_EMAIL") or "").strip()
 ZENDESK_API_TOKEN = (os.environ.get("ZENDESK_API_TOKEN") or "").strip()
-ANTHROPIC_API_KEY = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
 
 # Google Drive upload (optional)
-GDRIVE_SA_JSON   = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")  # full JSON key string
-GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")            # folder or Shared Drive folder ID
+GDRIVE_SA_JSON   = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
 
 ZENDESK_BASE_URL = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2"
 
-# How many tickets to process per run (to control API costs)
+# How many tickets to process per run
 MAX_TICKETS = int(os.environ.get("MAX_TICKETS", "50"))
 
-# Claude model to use
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
-
-# Rate limiting: seconds to wait between API calls
+# Rate limiting: seconds to wait between Zendesk API calls
 ZENDESK_RATE_LIMIT_DELAY = float(os.environ.get("ZENDESK_RATE_LIMIT_DELAY", "0.5"))
-CLAUDE_RATE_LIMIT_DELAY = float(os.environ.get("CLAUDE_RATE_LIMIT_DELAY", "1.0"))
 
 # Retry configuration
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
@@ -90,7 +87,6 @@ PII_PATTERNS = [
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[SSN_REDACTED]"),
     (re.compile(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b"), "[CC_REDACTED]"),
     (re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"), "[IP_REDACTED]"),
-    (re.compile(r"\b[A-Za-z0-9_-]{32,}\b"), "[TOKEN_REDACTED]"),
 ]
 
 
@@ -115,7 +111,7 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
             for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
-                except (requests.RequestException, anthropic.APIError) as e:
+                except requests.RequestException as e:
                     last_exception = e
                     if attempt < max_retries:
                         delay = base_delay * (2 ** attempt)
@@ -133,29 +129,6 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
         return wrapper
     return decorator
 
-
-# ---------------------------------------------------------------------------
-# Claude API limit detection
-# ---------------------------------------------------------------------------
-
-CLAUDE_LIMIT_PATTERNS = [
-    "credit balance is too low",
-    "monthly spend limit",
-    "rate limit exceeded",
-    "token limit",
-    "billing",
-    "exceeded your current quota",
-    "insufficient_quota",
-]
-
-
-class ClaudeTokenLimitError(Exception):
-    pass
-
-
-def is_claude_limit_error(error: anthropic.APIError) -> bool:
-    error_str = str(error).lower()
-    return any(pattern in error_str for pattern in CLAUDE_LIMIT_PATTERNS)
 
 # ---------------------------------------------------------------------------
 # Zendesk helpers
@@ -222,36 +195,281 @@ def fetch_ticket_comments(ticket_id: int) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Claude title suggestion
+# Rule-based title analysis
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """\
-You are a Zendesk ticket title optimizer. Your job is to read the current title \
-and body of a support ticket and suggest a clearer, more descriptive title that \
-will help support agents quickly understand what the ticket is about.
+# Titles that are clearly too vague (case-insensitive exact or near-exact match)
+VAGUE_TITLES = {
+    "help", "help!", "help me", "please help", "need help",
+    "question", "a question", "quick question",
+    "issue", "problem", "error", "bug",
+    "request", "new request", "support request",
+    "urgent", "urgent!", "asap",
+    "hi", "hello", "hey", "good morning", "good afternoon",
+    "follow up", "follow-up", "following up",
+    "update", "status update", "checking in",
+    "re:", "fw:", "fwd:",
+    "test", "testing", "test ticket",
+    "ticket", "new ticket", "support ticket",
+    "inquiry", "general inquiry",
+    "info", "information", "information needed",
+    "assistance", "need assistance", "assistance needed",
+    "account", "my account", "account issue", "account problem",
+    "access", "access issue", "can't access", "cannot access",
+    "login", "log in", "login issue", "can't login", "cannot login",
+    "password", "password reset", "forgot password",
+    "billing", "invoice", "payment",
+    "certificate", "certification",
+    "registration", "register",
+    "question about my account",
+    "not working", "doesn't work", "it's not working",
+    "broken", "something is broken",
+    "none", "n/a", "na", "no subject", "(no subject)",
+    "...", ".", "-", "--", "___",
+}
 
-Rules:
-- Keep the suggested title under 100 characters.
-- Be specific: include the product, feature, or error if mentioned.
-- Use sentence case.
-- Do not add ticket IDs or status to the title.
-- Do not include any personal information (names, emails, account numbers) in the title.
-- If the current title is already clear and descriptive, respond with "KEEP" and nothing else.
-- Respond with ONLY the suggested title (or "KEEP"). No explanation, no quotes.
+# Words that don't help identify what the ticket is about
+STOP_WORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "shall",
+    "should", "may", "might", "must", "can", "could", "i", "me", "my",
+    "we", "our", "you", "your", "he", "she", "it", "they", "them", "their",
+    "this", "that", "these", "those", "am", "of", "in", "to", "for", "with",
+    "on", "at", "from", "by", "about", "as", "into", "through", "during",
+    "before", "after", "above", "below", "between", "out", "off", "over",
+    "under", "again", "further", "then", "once", "here", "there", "when",
+    "where", "why", "how", "all", "both", "each", "few", "more", "most",
+    "other", "some", "such", "no", "nor", "not", "only", "own", "same",
+    "so", "than", "too", "very", "just", "because", "but", "and", "or",
+    "if", "while", "also", "get", "got", "getting", "need", "needed",
+    "want", "wanted", "please", "thanks", "thank", "hi", "hello", "hey",
+    "dear", "sir", "madam", "team", "support", "help", "issue", "problem",
+    "able", "unable", "trying", "try", "tried", "like", "know", "think",
+    "still", "seem", "seems", "new", "using", "use", "used",
+    "email_redacted", "phone_redacted", "token_redacted",
+    "ip_redacted", "ssn_redacted", "cc_redacted",
+}
 
-Examples:
+# Known products/features to boost in title suggestions
+KNOWN_PRODUCTS = [
+    "CSA STAR", "STAR Registry", "STAR Level", "STAR Attestation",
+    "CCSK", "CCAK", "CCZT", "Certificate of Cloud Security Knowledge",
+    "Certificate of Cloud Auditing Knowledge",
+    "Cloud Controls Matrix", "CCM", "CAIQ",
+    "AI Safety", "IoT", "Zero Trust",
+    "STARWatch", "STAR Watch",
+    "GRC Stack", "GRC", "Trusted Cloud Provider",
+    "SOC 2", "ISO 27001", "ISO 27017", "ISO 27018",
+    "Shared Drive", "Google Drive", "SSO", "MFA", "API",
+    "Zendesk", "Dashboard", "Portal",
+]
 
-Current title: "Help"
-Description: "I can't log into my CCAK dashboard. It says my session expired but I just logged in 5 minutes ago."
-Suggested title: CCAK dashboard login fails with session expiration error
+# Compile product patterns for matching (case-insensitive)
+PRODUCT_PATTERNS = [(re.compile(re.escape(p), re.IGNORECASE), p) for p in KNOWN_PRODUCTS]
 
-Current title: "Question about my account"
-Description: "I purchased CSA STAR certification last month and need to consolidate it with my other purchases under our company account."
-Suggested title: Consolidate CSA STAR certification purchase under company account
 
-Current title: "CSA STAR registry  - update request"
-Suggested title: KEEP
-"""
+def is_vague_title(title: str) -> bool:
+    """Check if a title is too vague/generic to be useful."""
+    cleaned = title.strip().lower()
+    cleaned = re.sub(r"^(re|fw|fwd)\s*:\s*", "", cleaned).strip()
+
+    # Exact match against vague titles
+    if cleaned in VAGUE_TITLES:
+        return True
+
+    # Too short (under 3 words or under 10 chars)
+    words = cleaned.split()
+    if len(words) < 3 or len(cleaned) < 10:
+        return True
+
+    # Only contains stop words
+    meaningful_words = [w for w in words if w.lower() not in STOP_WORDS]
+    if len(meaningful_words) == 0:
+        return True
+
+    # Is just a person's name pattern (1-3 capitalized words, no other content)
+    name_pattern = re.compile(r"^[A-Z][a-z]+(\s+[A-Z][a-z]+){0,2}$")
+    if name_pattern.match(title.strip()):
+        return True
+
+    return False
+
+
+def extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
+    """Extract the most relevant keywords from text."""
+    if not text:
+        return []
+
+    text = redact_pii(text)
+
+    # First, check for known product mentions
+    found_products = []
+    for pattern, product_name in PRODUCT_PATTERNS:
+        if pattern.search(text):
+            found_products.append(product_name)
+
+    # Tokenize and count meaningful words
+    words = re.findall(r"[a-zA-Z]{3,}", text.lower())
+    meaningful = [w for w in words if w not in STOP_WORDS and len(w) > 2]
+    word_counts = Counter(meaningful)
+
+    # Get top keywords (excluding product names already found)
+    product_words = set()
+    for p in found_products:
+        product_words.update(w.lower() for w in p.split())
+
+    top_words = [
+        word for word, _ in word_counts.most_common(max_keywords + 10)
+        if word not in product_words
+    ][:max_keywords]
+
+    return found_products + top_words
+
+
+def build_suggested_title(title: str, description: str, comments: list[dict]) -> str:
+    """Build a suggested title from the ticket description and comments."""
+    # Combine text sources
+    all_text = description or ""
+    for c in comments[:3]:
+        body = c.get("plain_body") or c.get("body", "")
+        if body:
+            all_text += " " + body
+
+    all_text = all_text[:3000]  # Cap text length
+
+    # Extract keywords
+    keywords = extract_keywords(all_text)
+
+    if not keywords:
+        return ""
+
+    # Check for common action patterns in the description
+    desc_lower = (description or "").lower()[:1500]
+    action = ""
+
+    action_patterns = [
+        (r"(can't|cannot|unable to|couldn't|could not)\s+(access|log\s*in|sign\s*in|connect|view|open|download|upload|use|find|see|load|reach)",
+         "Cannot {match}"),
+        (r"(need|want|would like|requesting|request)\s+(?:to\s+)?(add|remove|change|update|reset|create|delete|modify|enable|disable|upgrade|renew|transfer|consolidate)",
+         "Request to {match}"),
+        (r"(how|where)\s+(?:do|can|to)\s+(.*?)[\?\.]",
+         "Question: How to {match}"),
+        (r"(error|failed|failure|crash|broken|bug|not working|doesn'?t work|isn'?t working)",
+         "Error"),
+        (r"(expired?|expir(?:ing|ation))",
+         "Expiration issue"),
+        (r"(invoice|billing|charge|payment|refund|credit)",
+         "Billing inquiry"),
+        (r"(certificate|certification|exam|badge|credential)",
+         "Certification"),
+        (r"(registry|listing|profile|entry)",
+         "Registry/listing"),
+    ]
+
+    for pattern, template in action_patterns:
+        match = re.search(pattern, desc_lower)
+        if match:
+            if "{match}" in template:
+                # Get the matched action words
+                groups = match.groups()
+                relevant = groups[-1] if len(groups) > 1 else groups[0]
+                action = template.replace("{match}", relevant.strip())
+            else:
+                action = template
+            break
+
+    # Build the title
+    products = [k for k in keywords if any(p == k for _, p in PRODUCT_PATTERNS)]
+    other_keywords = [k for k in keywords if k not in products][:4]
+
+    if products and action:
+        title = f"{products[0]}: {action}"
+    elif products:
+        context = " ".join(other_keywords[:3]).capitalize() if other_keywords else "inquiry"
+        title = f"{products[0]} — {context}"
+    elif action:
+        context = " ".join(other_keywords[:3]) if other_keywords else ""
+        title = f"{action}" + (f" — {context}" if context else "")
+    else:
+        # Fallback: just use top keywords
+        title = " ".join(other_keywords[:5]).capitalize()
+
+    # Clean up the title
+    title = title.strip(" —-:")
+    title = re.sub(r"\s+", " ", title)
+
+    # Capitalize first letter
+    if title:
+        title = title[0].upper() + title[1:]
+
+    # Enforce max length
+    if len(title) > 100:
+        title = title[:97] + "..."
+
+    return title if len(title) >= 10 else ""
+
+
+def suggest_title(ticket: dict, comments: list[dict]) -> dict:
+    """Analyze a ticket title using heuristic rules and suggest improvements."""
+    current_title = ticket.get("subject", ticket.get("raw_subject", ""))
+    description = ticket.get("description", "")
+
+    if not is_vague_title(current_title):
+        # Title seems descriptive enough — keep it
+        return {
+            "suggested_title": "",
+            "status": "Keep Current",
+            "reason": "Title is already descriptive",
+        }
+
+    # Title is vague — try to build a better one
+    suggested = build_suggested_title(current_title, description, comments)
+
+    if suggested and suggested.lower() != current_title.lower():
+        # Validate the suggestion
+        validated = validate_suggestion(suggested, ticket["id"])
+        if validated:
+            reason = classify_vagueness(current_title)
+            return {
+                "suggested_title": validated,
+                "status": "Suggestion",
+                "reason": reason,
+            }
+
+    return {
+        "suggested_title": "",
+        "status": "Keep Current",
+        "reason": "Could not generate a better title from ticket content",
+    }
+
+
+def classify_vagueness(title: str) -> str:
+    """Return a human-readable reason why the title was flagged."""
+    cleaned = title.strip().lower()
+    cleaned = re.sub(r"^(re|fw|fwd)\s*:\s*", "", cleaned).strip()
+
+    if cleaned in {"", "none", "n/a", "na", "no subject", "(no subject)", "...", ".", "-", "--", "___"}:
+        return "Title is empty or placeholder"
+
+    words = cleaned.split()
+    if len(words) == 1:
+        return f"Single-word title \"{title.strip()}\" — too vague for triage"
+
+    if len(cleaned) < 10:
+        return f"Title too short ({len(cleaned)} chars) to identify the issue"
+
+    meaningful = [w for w in words if w not in STOP_WORDS]
+    if len(meaningful) == 0:
+        return "Title contains only generic/filler words"
+
+    name_pattern = re.compile(r"^[A-Z][a-z]+(\s+[A-Z][a-z]+){0,2}$")
+    if name_pattern.match(title.strip()):
+        return "Title appears to be a person's name, not a description"
+
+    if cleaned in VAGUE_TITLES:
+        return f"Generic title \"{title.strip()}\" — doesn't describe the specific issue"
+
+    return "Title lacks specificity for effective triage"
 
 
 def validate_suggestion(suggestion: str, ticket_id: int) -> str | None:
@@ -281,51 +499,6 @@ def validate_suggestion(suggestion: str, ticket_id: int) -> str | None:
             return None
 
     return suggestion
-
-
-def suggest_title(client: anthropic.Anthropic, ticket: dict, comments: list[dict]) -> dict:
-    current_title = ticket.get("subject", ticket.get("raw_subject", ""))
-    description = ticket.get("description", "")
-
-    redacted_title = redact_pii(current_title)
-    redacted_description = redact_pii(description[:2000])
-
-    comment_texts = []
-    for c in comments[:3]:
-        body = c.get("plain_body") or c.get("body", "")
-        if body:
-            comment_texts.append(redact_pii(body[:1000]))
-
-    user_message = f"""Current title: {redacted_title}
-
-Ticket description:
-{redacted_description}
-
-Additional comments:
-{chr(10).join(comment_texts) if comment_texts else "(none)"}"""
-
-    try:
-        time.sleep(CLAUDE_RATE_LIMIT_DELAY)
-
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=150,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-        )
-        suggestion = response.content[0].text.strip()
-        if suggestion.upper() == "KEEP":
-            return {"suggested_title": "", "status": "Keep Current", "reason": "Title is already clear and descriptive"}
-        validated = validate_suggestion(suggestion, ticket["id"])
-        if validated:
-            return {"suggested_title": validated, "status": "Suggestion", "reason": "Title could be more descriptive"}
-        return {"suggested_title": "", "status": "Keep Current", "reason": "Suggestion failed validation"}
-    except anthropic.APIError as e:
-        if is_claude_limit_error(e):
-            logger.error("Claude API limit reached for ticket #%s: %s", ticket["id"], e)
-            raise ClaudeTokenLimitError(str(e))
-        logger.error("Claude API error for ticket #%s: %s", ticket["id"], e)
-        return {"suggested_title": "", "status": "Error", "reason": str(e)[:120]}
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +572,6 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
         ("Suggestions Made:", str(run_meta["suggestions_made"]), SUGGEST_BADGE),
         ("Titles Kept:",      str(run_meta["titles_kept"]),      KEEP_BADGE),
         ("Errors:",           str(run_meta["errors"]),           ERROR_BADGE),
-        ("Skipped (Limit):",  str(run_meta.get("skipped", 0)),  SKIP_BADGE),
     ]
     for sr, (label, val, color) in enumerate(summary_items, 1):
         c = ws.cell(row=sr, column=1, value=label)
@@ -500,9 +672,8 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
         ("Suggestions Made", run_meta["suggestions_made"],  SUGGEST_BADGE),
         ("Titles Kept",      run_meta["titles_kept"],       KEEP_BADGE),
         ("Errors",           run_meta["errors"],            ERROR_BADGE),
-        ("Skipped (Limit)",  run_meta.get("skipped", 0),   SKIP_BADGE),
         ("PII Redaction",    "Enabled",                     "1F2D3D"),
-        ("Mode",             "Log Only",                    "1F2D3D"),
+        ("Mode",             "Rule-Based (no AI API)",      "1F2D3D"),
     ]
     row_num = 3
     for label, val, color in stats:
@@ -620,7 +791,7 @@ def upload_to_gdrive(file_path):
 
 def main():
     missing = []
-    for var in ("ZENDESK_SUBDOMAIN", "ZENDESK_EMAIL", "ZENDESK_API_TOKEN", "ANTHROPIC_API_KEY"):
+    for var in ("ZENDESK_SUBDOMAIN", "ZENDESK_EMAIL", "ZENDESK_API_TOKEN"):
         if not os.environ.get(var):
             missing.append(var)
     if missing:
@@ -628,17 +799,15 @@ def main():
         sys.exit(1)
 
     logger.info("=" * 60)
-    logger.info("Zendesk Ticket Title Suggester")
+    logger.info("Zendesk Ticket Title Suggester (Rule-Based)")
     logger.info("=" * 60)
     logger.info("Mode: LOG ONLY (no tickets will be modified)")
+    logger.info("Engine: Heuristic rules (no AI API required)")
     logger.info("Max tickets: %d", MAX_TICKETS)
-    logger.info("Claude model: %s", CLAUDE_MODEL)
-    logger.info("Rate limits: Zendesk=%.1fs, Claude=%.1fs", ZENDESK_RATE_LIMIT_DELAY, CLAUDE_RATE_LIMIT_DELAY)
+    logger.info("Rate limits: Zendesk=%.1fs", ZENDESK_RATE_LIMIT_DELAY)
     logger.info("Retry config: max_retries=%d, base_delay=%.1fs", MAX_RETRIES, RETRY_BASE_DELAY)
     logger.info("PII redaction: ENABLED")
     logger.info("=" * 60)
-
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     logger.info("Fetching open tickets from Zendesk (%s)...", ZENDESK_SUBDOMAIN)
     try:
@@ -685,33 +854,7 @@ def main():
             })
             continue
 
-        try:
-            result = suggest_title(client, ticket, comments)
-        except ClaudeTokenLimitError as e:
-            logger.error("=" * 60)
-            logger.error("CLAUDE API LIMIT REACHED \u2014 stopping early.")
-            logger.error("Reason: %s", e)
-            logger.error("Processed %d/%d tickets before limit was hit.", i - 1, len(tickets))
-            logger.error("Add credits at https://console.anthropic.com/settings/billing")
-            logger.error("=" * 60)
-            for remaining_ticket in tickets[i - 1:]:
-                rt_id = remaining_ticket["id"]
-                rt_title = remaining_ticket.get("subject", remaining_ticket.get("raw_subject", ""))
-                rt_url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/agent/tickets/{rt_id}"
-                report_rows.append({
-                    "Ticket #": rt_id,
-                    "Status": "Skipped",
-                    "Current Title": rt_title,
-                    "Suggested Title": "",
-                    "Recommendation": "Re-run After Adding Credits",
-                    "Reason": "Claude API limit reached",
-                    "Ticket URL": rt_url,
-                    "Ticket Status": remaining_ticket.get("status", "").capitalize(),
-                    "Priority": (remaining_ticket.get("priority", "") or "").capitalize(),
-                    "Created": format_date(remaining_ticket.get("created_at", "")),
-                    "Last Updated": format_date(remaining_ticket.get("updated_at", "")),
-                })
-            break
+        result = suggest_title(ticket, comments)
 
         suggested_title = result["suggested_title"]
         status = result["status"]
@@ -748,12 +891,11 @@ def main():
     print("\n" + "=" * 80)
     print(f"TITLE SUGGESTION REPORT \u2014 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
-    skipped = sum(1 for r in report_rows if r["Status"] == "Skipped")
     print(f"Tickets scanned: {len(tickets)}")
     print(f"Suggestions made: {suggestion_count}")
     print(f"Titles kept: {keep_count}")
     print(f"Errors encountered: {errors}")
-    print(f"Skipped (API limit): {skipped}")
+    print(f"Engine: Rule-based heuristics (no AI API)")
     print(f"PII redaction: enabled")
     print("=" * 80)
 
@@ -762,6 +904,7 @@ def main():
             print(f"\nTicket #{row['Ticket #']}  {row['Ticket URL']}")
             print(f"  Current:   {row['Current Title']}")
             print(f"  Suggested: {row['Suggested Title']}")
+            print(f"  Reason:    {row['Reason']}")
 
     print("\n" + "=" * 80)
 
@@ -771,7 +914,6 @@ def main():
         "suggestions_made": suggestion_count,
         "titles_kept": keep_count,
         "errors": errors,
-        "skipped": skipped,
     }
 
     write_xlsx_report(report_rows, REPORT_PATH, run_meta)
@@ -781,11 +923,9 @@ def main():
     if suggestion_count == 0:
         logger.info("All ticket titles look good \u2014 nothing to suggest!")
 
-    if errors > 0 and errors == len(tickets) and skipped == 0:
+    if errors > 0 and errors == len(tickets):
         logger.error("All tickets failed to process. Exiting with error.")
         sys.exit(1)
-    elif skipped > 0:
-        logger.warning("Run completed partially: %d tickets skipped due to Claude API limit.", skipped)
 
 
 if __name__ == "__main__":
