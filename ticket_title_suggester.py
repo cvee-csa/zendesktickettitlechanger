@@ -13,18 +13,20 @@ Guardrails:
 - Title length and content validation on suggestions
 """
 
-import csv
 import os
 import re
 import sys
 import json
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 
 import requests
 import anthropic
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 try:
     from google.oauth2 import service_account
@@ -66,6 +68,12 @@ RETRY_BASE_DELAY = float(os.environ.get("RETRY_BASE_DELAY", "2.0"))
 # Maximum allowed title length for suggestions
 MAX_TITLE_LENGTH = 150
 
+# Report output
+PST = timezone(timedelta(hours=-8))
+_now = datetime.now(PST)
+NOW = _now.strftime("%Y-%m-%d_%I%M") + ("am" if _now.hour < 12 else "pm")
+REPORT_PATH = os.environ.get("OUTPUT_FILE", f"/tmp/Title_Suggestions_{NOW}.xlsx")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -77,23 +85,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 PII_PATTERNS = [
-    # Email addresses
     (re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"), "[EMAIL_REDACTED]"),
-    # Phone numbers (various formats)
     (re.compile(r"\b(\+?1?[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"), "[PHONE_REDACTED]"),
-    # SSN
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[SSN_REDACTED]"),
-    # Credit card numbers (basic pattern)
     (re.compile(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b"), "[CC_REDACTED]"),
-    # IP addresses
     (re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"), "[IP_REDACTED]"),
-    # API keys / tokens (long hex or base64 strings)
     (re.compile(r"\b[A-Za-z0-9_-]{32,}\b"), "[TOKEN_REDACTED]"),
 ]
 
 
 def redact_pii(text: str) -> str:
-    """Remove personally identifiable information from text before sending to Claude."""
     if not text:
         return text
     for pattern, replacement in PII_PATTERNS:
@@ -107,7 +108,6 @@ def redact_pii(text: str) -> str:
 
 
 def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY_BASE_DELAY):
-    """Decorator that retries a function with exponential backoff on failure."""
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -134,14 +134,10 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
     return decorator
 
 
-
 # ---------------------------------------------------------------------------
 # Claude API limit detection
 # ---------------------------------------------------------------------------
 
-# Error messages from the Anthropic API that indicate a non-retryable billing
-# or token limit problem.  When one of these is detected the script stops
-# early instead of burning through every remaining ticket.
 CLAUDE_LIMIT_PATTERNS = [
     "credit balance is too low",
     "monthly spend limit",
@@ -154,12 +150,10 @@ CLAUDE_LIMIT_PATTERNS = [
 
 
 class ClaudeTokenLimitError(Exception):
-    """Raised when the Claude API reports a billing or token limit issue."""
     pass
 
 
 def is_claude_limit_error(error: anthropic.APIError) -> bool:
-    """Check whether an Anthropic API error indicates a token/credit limit."""
     error_str = str(error).lower()
     return any(pattern in error_str for pattern in CLAUDE_LIMIT_PATTERNS)
 
@@ -169,12 +163,10 @@ def is_claude_limit_error(error: anthropic.APIError) -> bool:
 
 
 def zendesk_auth():
-    """Return the (email/token, api_token) tuple for Zendesk basic auth."""
     return (f"{ZENDESK_EMAIL}/token", ZENDESK_API_TOKEN)
 
 
 def handle_zendesk_rate_limit(response: requests.Response, attempt: int = 0):
-    """Check for Zendesk 429 rate limit or transient 5xx errors and wait if needed."""
     if response.status_code == 429:
         retry_after = int(response.headers.get("Retry-After", 60))
         logger.warning("Zendesk rate limit hit. Waiting %d seconds...", retry_after)
@@ -193,7 +185,6 @@ def handle_zendesk_rate_limit(response: requests.Response, attempt: int = 0):
 
 @retry_with_backoff()
 def fetch_open_tickets() -> list[dict]:
-    """Fetch open (and new) tickets from Zendesk using the Search API."""
     tickets = []
     query = "type:ticket status<solved"
     url = f"{ZENDESK_BASE_URL}/search.json"
@@ -204,14 +195,14 @@ def fetch_open_tickets() -> list[dict]:
         for attempt in range(MAX_RETRIES + 1):
             resp = requests.get(url, auth=zendesk_auth(), params=params, timeout=30)
             if handle_zendesk_rate_limit(resp, attempt):
-                continue  # retry the same request
-            break  # not a retryable status code
+                continue
+            break
 
         resp.raise_for_status()
         data = resp.json()
         tickets.extend(data.get("results", []))
         url = data.get("next_page")
-        params = None  # next_page URL already contains query params
+        params = None
         time.sleep(ZENDESK_RATE_LIMIT_DELAY)
 
     return tickets[:MAX_TICKETS]
@@ -219,12 +210,11 @@ def fetch_open_tickets() -> list[dict]:
 
 @retry_with_backoff()
 def fetch_ticket_comments(ticket_id: int) -> list[dict]:
-    """Fetch the first few comments on a ticket to provide context."""
     url = f"{ZENDESK_BASE_URL}/tickets/{ticket_id}/comments.json"
     for attempt in range(MAX_RETRIES + 1):
         resp = requests.get(url, auth=zendesk_auth(), params={"per_page": 5}, timeout=30)
         if handle_zendesk_rate_limit(resp, attempt):
-            continue  # retry on 429 or 5xx
+            continue
         break
 
     resp.raise_for_status()
@@ -265,7 +255,6 @@ Suggested title: KEEP
 
 
 def validate_suggestion(suggestion: str, ticket_id: int) -> str | None:
-    """Validate a suggested title before accepting it."""
     if not suggestion or not suggestion.strip():
         logger.warning("Ticket #%s: Empty suggestion received, skipping.", ticket_id)
         return None
@@ -279,11 +268,10 @@ def validate_suggestion(suggestion: str, ticket_id: int) -> str | None:
         )
         return None
 
-    # Reject suggestions that look like they contain PII the model leaked back
     pii_leak_patterns = [
-        re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"),  # email
-        re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),  # SSN
-        re.compile(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b"),  # CC
+        re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"),
+        re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+        re.compile(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b"),
     ]
     for pattern in pii_leak_patterns:
         if pattern.search(suggestion):
@@ -296,21 +284,12 @@ def validate_suggestion(suggestion: str, ticket_id: int) -> str | None:
 
 
 def suggest_title(client: anthropic.Anthropic, ticket: dict, comments: list[dict]) -> dict:
-    """Use Claude to suggest a better title for the given ticket.
-
-    Returns a dict with keys:
-        suggested_title: str or empty string
-        status: "Suggestion" | "Keep Current" | "Error"
-        reason: short explanation
-    """
     current_title = ticket.get("subject", ticket.get("raw_subject", ""))
     description = ticket.get("description", "")
 
-    # Redact PII from content before sending to Claude
     redacted_title = redact_pii(current_title)
     redacted_description = redact_pii(description[:2000])
 
-    # Build context from first few comments (redacted)
     comment_texts = []
     for c in comments[:3]:
         body = c.get("plain_body") or c.get("body", "")
@@ -326,7 +305,6 @@ Additional comments:
 {chr(10).join(comment_texts) if comment_texts else "(none)"}"""
 
     try:
-        # Rate limit Claude API calls
         time.sleep(CLAUDE_RATE_LIMIT_DELAY)
 
         response = client.messages.create(
@@ -351,12 +329,56 @@ Additional comments:
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Spreadsheet builder
 # ---------------------------------------------------------------------------
+
+DARK_HEADER   = "1F2D3D"
+SUMMARY_BG    = "E8EAF6"
+SUGGEST_FILL  = "E8F4E8";  ALT_SUGGEST  = "F0FAF0"
+KEEP_FILL     = "F5F5F5";  ALT_KEEP     = "FAFAFA"
+ERROR_FILL    = "FFE8E8";  ALT_ERROR    = "FFF0F0"
+SKIP_FILL     = "FFF9C4";  ALT_SKIP     = "FFFDE7"
+LINK_COLOR    = "1155CC"
+SUGGEST_BADGE = "27AE60"
+KEEP_BADGE    = "7F8C8D"
+ERROR_BADGE   = "C0392B"
+SKIP_BADGE    = "F57F17"
+
+HEADERS = [
+    "Ticket #", "Status", "Current Title", "Suggested Title",
+    "Recommendation", "Reason", "Ticket Status", "Priority",
+    "Created", "Last Updated",
+]
+WIDTHS = [10, 14, 44, 44, 18, 36, 12, 10, 13, 13]
+
+
+def _border():
+    s = Side(style="thin", color="CCCCCC")
+    return Border(left=s, right=s, top=s, bottom=s)
+
+
+def _cell(ws, row, col, value, bold=False, fc="000000",
+          bg=None, wrap=False, align="left", size=11):
+    c = ws.cell(row=row, column=col, value=value)
+    c.font = Font(name="Arial", bold=bold, color=fc, size=size)
+    c.alignment = Alignment(horizontal=align, vertical="top", wrap_text=wrap)
+    if bg:
+        c.fill = PatternFill("solid", start_color=bg)
+    c.border = _border()
+    return c
+
+
+def _status_colors(status):
+    if status == "Suggestion":
+        return (SUGGEST_FILL, ALT_SUGGEST, SUGGEST_BADGE)
+    elif status == "Error":
+        return (ERROR_FILL, ALT_ERROR, ERROR_BADGE)
+    elif status == "Skipped":
+        return (SKIP_FILL, ALT_SKIP, SKIP_BADGE)
+    return (KEEP_FILL, ALT_KEEP, KEEP_BADGE)
 
 
 def format_date(iso_string: str | None) -> str:
-    """Convert an ISO date string to MM/DD/YYYY format."""
     if not iso_string:
         return ""
     try:
@@ -366,64 +388,178 @@ def format_date(iso_string: str | None) -> str:
         return str(iso_string)[:10]
 
 
-# ---------------------------------------------------------------------------
-# CSV Report columns (inspired by ESC/RARC report structure)
-# ---------------------------------------------------------------------------
+def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Title Suggestions"
 
-CSV_COLUMNS = [
-    "Ticket #",
-    "Status",
-    "Current Title",
-    "Suggested Title",
-    "Recommendation",
-    "Reason",
-    "Ticket URL",
-    "Ticket Status",
-    "Priority",
-    "Created",
-    "Last Updated",
-]
+    # ── Summary rows ──────────────────────────────────────────────────────
+    summary_items = [
+        ("Tickets Scanned:",  str(run_meta["tickets_scanned"]),  "1F2D3D"),
+        ("Suggestions Made:", str(run_meta["suggestions_made"]), SUGGEST_BADGE),
+        ("Titles Kept:",      str(run_meta["titles_kept"]),      KEEP_BADGE),
+        ("Errors:",           str(run_meta["errors"]),           ERROR_BADGE),
+        ("Skipped (Limit):",  str(run_meta.get("skipped", 0)),  SKIP_BADGE),
+    ]
+    for sr, (label, val, color) in enumerate(summary_items, 1):
+        c = ws.cell(row=sr, column=1, value=label)
+        c.font = Font(name="Arial", bold=True, size=12, color=color)
+        c.fill = PatternFill("solid", start_color=SUMMARY_BG)
+        c.alignment = Alignment(horizontal="right", vertical="center")
 
+        c2 = ws.cell(row=sr, column=2, value=int(val))
+        c2.font = Font(name="Arial", bold=True, size=14, color=color)
+        c2.fill = PatternFill("solid", start_color=SUMMARY_BG)
+        c2.alignment = Alignment(horizontal="left", vertical="center")
 
-def write_csv_report(rows: list[dict], output_path: str, run_meta: dict):
-    """Write the title suggestion report as a CSV file.
+        for col in range(3, len(HEADERS) + 1):
+            sc = ws.cell(row=sr, column=col)
+            sc.fill = PatternFill("solid", start_color=SUMMARY_BG)
 
-    Includes a summary header block followed by one row per ticket.
-    """
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+    ws.row_dimensions[len(summary_items) + 1].height = 6  # spacer
 
-        # --- Summary header block (mirrors the ESC/RARC report style) ---
-        writer.writerow(["Title Suggestion Report"])
-        writer.writerow(["Run Date", run_meta["run_date"]])
-        writer.writerow(["Tickets Scanned", run_meta["tickets_scanned"]])
-        writer.writerow(["Suggestions Made", run_meta["suggestions_made"]])
-        writer.writerow(["Titles Kept", run_meta["titles_kept"]])
-        writer.writerow(["Errors", run_meta["errors"]])
-        writer.writerow(["Skipped (API Limit)", run_meta.get("skipped", 0)])
-        writer.writerow(["PII Redaction", "Enabled"])
-        writer.writerow(["Mode", "Log Only"])
-        writer.writerow([])  # blank separator row
+    # ── Header row ────────────────────────────────────────────────────────
+    HEADER_ROW = len(summary_items) + 2
+    for col, (h, w) in enumerate(zip(HEADERS, WIDTHS), 1):
+        c = ws.cell(row=HEADER_ROW, column=col, value=h)
+        c.font = Font(name="Arial", bold=True, color="FFFFFF", size=11)
+        c.fill = PatternFill("solid", start_color=DARK_HEADER)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = _border()
+        ws.column_dimensions[get_column_letter(col)].width = w
+    ws.row_dimensions[HEADER_ROW].height = 24
 
-        # --- Column headers ---
-        writer.writerow(CSV_COLUMNS)
+    # ── Data rows ─────────────────────────────────────────────────────────
+    cur_row = HEADER_ROW + 1
+    for r in rows:
+        status = r.get("Status", "Keep Current")
+        fill_main, fill_alt, badge_color = _status_colors(status)
+        even = cur_row % 2 == 0
+        bg = fill_main if not even else fill_alt
 
-        # --- Data rows ---
-        for row in rows:
-            writer.writerow([row.get(col, "") for col in CSV_COLUMNS])
+        # Col 1: Ticket # (hyperlinked)
+        ticket_id = r.get("Ticket #", "")
+        url = r.get("Ticket URL", "")
+        lnk = ws.cell(row=cur_row, column=1, value=ticket_id)
+        lnk.font = Font(name="Arial", bold=True, color=LINK_COLOR, underline="single", size=11)
+        lnk.alignment = Alignment(horizontal="center", vertical="top")
+        if url:
+            lnk.hyperlink = url
+        lnk.fill = PatternFill("solid", start_color=bg)
+        lnk.border = _border()
 
-    logger.info("CSV report written to %s (%d data rows)", output_path, len(rows))
+        # Col 2: Status (colour-coded badge)
+        _cell(ws, cur_row, 2, status, bold=True, fc=badge_color, bg=bg, align="center")
 
+        # Col 3: Current Title
+        _cell(ws, cur_row, 3, r.get("Current Title", ""), bg=bg, wrap=True)
+
+        # Col 4: Suggested Title (bold green if suggestion)
+        suggested = r.get("Suggested Title", "")
+        if status == "Suggestion" and suggested:
+            _cell(ws, cur_row, 4, suggested, bold=True, fc=SUGGEST_BADGE, bg=bg, wrap=True)
+        else:
+            _cell(ws, cur_row, 4, suggested, bg=bg, wrap=True)
+
+        # Col 5: Recommendation
+        _cell(ws, cur_row, 5, r.get("Recommendation", ""), bold=True, fc=badge_color, bg=bg, align="center")
+
+        # Col 6: Reason
+        _cell(ws, cur_row, 6, r.get("Reason", ""), bg=bg, wrap=True, size=10)
+
+        # Col 7: Ticket Status
+        _cell(ws, cur_row, 7, r.get("Ticket Status", ""), bg=bg, align="center")
+
+        # Col 8: Priority
+        _cell(ws, cur_row, 8, r.get("Priority", ""), bg=bg, align="center")
+
+        # Col 9: Created
+        _cell(ws, cur_row, 9, r.get("Created", ""), bg=bg, align="center")
+
+        # Col 10: Last Updated
+        _cell(ws, cur_row, 10, r.get("Last Updated", ""), bg=bg, align="center")
+
+        ws.row_dimensions[cur_row].height = 48
+        cur_row += 1
+
+    ws.freeze_panes = f"A{HEADER_ROW + 1}"
+
+    # ── Executive Summary sheet ───────────────────────────────────────────
+    es = wb.create_sheet("Summary", 0)
+    today_str = _now.strftime("%Y-%m-%d")
+
+    es.merge_cells("A1:F1")
+    title_cell = es.cell(row=1, column=1, value=f"Title Suggestion Report \u2014 {today_str}")
+    title_cell.font = Font(name="Arial", bold=True, size=16, color="1F2D3D")
+    title_cell.alignment = Alignment(horizontal="left", vertical="center")
+    es.row_dimensions[1].height = 32
+
+    stats = [
+        ("Run Date",         run_meta["run_date"],          "1F2D3D"),
+        ("Tickets Scanned",  run_meta["tickets_scanned"],   "1F2D3D"),
+        ("Suggestions Made", run_meta["suggestions_made"],  SUGGEST_BADGE),
+        ("Titles Kept",      run_meta["titles_kept"],       KEEP_BADGE),
+        ("Errors",           run_meta["errors"],            ERROR_BADGE),
+        ("Skipped (Limit)",  run_meta.get("skipped", 0),   SKIP_BADGE),
+        ("PII Redaction",    "Enabled",                     "1F2D3D"),
+        ("Mode",             "Log Only",                    "1F2D3D"),
+    ]
+    row_num = 3
+    for label, val, color in stats:
+        es.cell(row=row_num, column=1, value=label).font = Font(
+            name="Arial", bold=True, size=11, color="333333")
+        v = es.cell(row=row_num, column=2, value=val)
+        v.font = Font(name="Arial", bold=True, size=13, color=color)
+        v.alignment = Alignment(horizontal="left")
+        row_num += 1
+
+    # Top suggestions table
+    suggestions_only = [r for r in rows if r.get("Status") == "Suggestion"]
+    if suggestions_only:
+        row_num += 1
+        es.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=4)
+        sec = es.cell(row=row_num, column=1, value=f"Suggested Title Changes ({len(suggestions_only)})")
+        sec.font = Font(name="Arial", bold=True, size=13, color="FFFFFF")
+        sec.fill = PatternFill("solid", start_color=DARK_HEADER)
+        sec.alignment = Alignment(horizontal="left", vertical="center")
+        es.row_dimensions[row_num].height = 24
+        row_num += 1
+
+        top_headers = ["#", "Current Title", "Suggested Title", "Reason"]
+        top_widths = [10, 44, 44, 36]
+        for ci, (h, w) in enumerate(zip(top_headers, top_widths), 1):
+            c = es.cell(row=row_num, column=ci, value=h)
+            c.font = Font(name="Arial", bold=True, size=10, color="666666")
+            c.border = _border()
+            es.column_dimensions[get_column_letter(ci)].width = w
+        row_num += 1
+
+        for r in suggestions_only[:10]:
+            tid_cell = es.cell(row=row_num, column=1, value=r.get("Ticket #", ""))
+            tid_url = r.get("Ticket URL", "")
+            tid_cell.font = Font(name="Arial", color=LINK_COLOR, underline="single", size=11)
+            if tid_url:
+                tid_cell.hyperlink = tid_url
+            tid_cell.border = _border()
+
+            es.cell(row=row_num, column=2, value=r.get("Current Title", "")[:60]).border = _border()
+
+            sug_cell = es.cell(row=row_num, column=3, value=r.get("Suggested Title", "")[:60])
+            sug_cell.font = Font(name="Arial", bold=True, color=SUGGEST_BADGE, size=11)
+            sug_cell.border = _border()
+
+            es.cell(row=row_num, column=4, value=r.get("Reason", "")).border = _border()
+
+            es.row_dimensions[row_num].height = 28
+            row_num += 1
+
+    wb.save(output_path)
+    logger.info("Spreadsheet saved \u2192 %s (%d data rows)", output_path, len(rows))
 
 
 # -- Google Drive upload -----------------------------------------------------
 
 def upload_to_gdrive(file_path):
-    """
-    Upload file_path to Google Drive (works with both My Drive and Shared Drives).
-    Requires GDRIVE_SERVICE_ACCOUNT_JSON and GDRIVE_FOLDER_ID env vars.
-    Skips silently if either is missing or google-auth libs are not installed.
-    """
     if not GDRIVE_AVAILABLE:
         print("  [Drive] google-auth libraries not installed -- skipping upload.")
         return
@@ -438,14 +574,12 @@ def upload_to_gdrive(file_path):
             return
         creds_info = json.loads(sa_json)
 
-        # Support both service account keys and OAuth user credentials
         if creds_info.get("type") == "service_account":
             creds = service_account.Credentials.from_service_account_info(
                 creds_info,
                 scopes=["https://www.googleapis.com/auth/drive"],
             )
         else:
-            # OAuth user credentials (from generate_oauth_token.py / InstalledAppFlow)
             from google.oauth2.credentials import Credentials
             creds = Credentials(
                 token=creds_info.get("token"),
@@ -462,11 +596,10 @@ def upload_to_gdrive(file_path):
         file_metadata = {"name": file_name, "parents": [GDRIVE_FOLDER_ID]}
         media = MediaFileUpload(
             file_path,
-            mimetype="text/csv",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             resumable=True,
         )
 
-        # supportsAllDrives=True makes it work for both Shared Drives and My Drive
         uploaded = service.files().create(
             body=file_metadata,
             media_body=media,
@@ -486,7 +619,6 @@ def upload_to_gdrive(file_path):
 
 
 def main():
-    # Validate required env vars
     missing = []
     for var in ("ZENDESK_SUBDOMAIN", "ZENDESK_EMAIL", "ZENDESK_API_TOKEN", "ANTHROPIC_API_KEY"):
         if not os.environ.get(var):
@@ -557,12 +689,11 @@ def main():
             result = suggest_title(client, ticket, comments)
         except ClaudeTokenLimitError as e:
             logger.error("=" * 60)
-            logger.error("CLAUDE API LIMIT REACHED — stopping early.")
+            logger.error("CLAUDE API LIMIT REACHED \u2014 stopping early.")
             logger.error("Reason: %s", e)
             logger.error("Processed %d/%d tickets before limit was hit.", i - 1, len(tickets))
             logger.error("Add credits at https://console.anthropic.com/settings/billing")
             logger.error("=" * 60)
-            # Mark remaining tickets (including this one) as skipped
             for remaining_ticket in tickets[i - 1:]:
                 rt_id = remaining_ticket["id"]
                 rt_title = remaining_ticket.get("subject", remaining_ticket.get("raw_subject", ""))
@@ -613,7 +744,7 @@ def main():
             "Last Updated": format_date(updated_at),
         })
 
-    # Print summary to stdout
+    # Print summary
     print("\n" + "=" * 80)
     print(f"TITLE SUGGESTION REPORT \u2014 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
@@ -634,7 +765,6 @@ def main():
 
     print("\n" + "=" * 80)
 
-    # Build run metadata for the report header
     run_meta = {
         "run_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "tickets_scanned": len(tickets),
@@ -644,17 +774,13 @@ def main():
         "skipped": skipped,
     }
 
-    # Write CSV report
-    csv_path = os.environ.get("OUTPUT_FILE", "title_suggestions.csv")
-    write_csv_report(report_rows, csv_path, run_meta)
+    write_xlsx_report(report_rows, REPORT_PATH, run_meta)
 
-    # Upload CSV to Google Drive (skips silently if not configured)
-    upload_to_gdrive(csv_path)
+    upload_to_gdrive(REPORT_PATH)
 
     if suggestion_count == 0:
         logger.info("All ticket titles look good \u2014 nothing to suggest!")
 
-    # Exit with error code only if real errors (not token limit skips)
     if errors > 0 and errors == len(tickets) and skipped == 0:
         logger.error("All tickets failed to process. Exiting with error.")
         sys.exit(1)

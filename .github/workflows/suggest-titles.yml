@@ -34,7 +34,6 @@ jobs:
           ZENDESK_API_TOKEN: ${{ secrets.ZENDESK_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MAX_TICKETS: ${{ inputs.max_tickets }}
-          OUTPUT_FILE: title_suggestions.csv
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: python ticket_title_suggester.py
@@ -44,5 +43,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: title-suggestions-report-${{ github.run_id }}
-          path: title_suggestions.csv
+          path: /tmp/Title_Suggestions_*.xlsx
           retention-days: 30
