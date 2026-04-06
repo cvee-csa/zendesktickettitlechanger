@@ -458,15 +458,18 @@ def is_automation_ticket(title: str, description: str) -> bool:
 def is_url_title(title: str) -> bool:
     """Check if a title is primarily a URL or URL fragment."""
     cleaned = title.strip()
-    # Matches full URLs, partial URLs, or URL-like strings
+    # Title starts with a URL (i.e. the URL *is* the title)
     if re.match(r"^https?://", cleaned, re.IGNORECASE):
         return True
     if re.match(r"^www\.", cleaned, re.IGNORECASE):
         return True
-    # URL that takes up most of the title (e.g. "see https://example.com/page")
+    # Title contains a URL — only flag if the non-URL text is too short to be meaningful
     url_match = re.search(r"https?://\S+", cleaned)
-    if url_match and len(url_match.group(0)) > len(cleaned) * 0.6:
-        return True
+    if url_match:
+        non_url_text = cleaned[:url_match.start()] + cleaned[url_match.end():]
+        non_url_words = [w for w in non_url_text.split() if len(w) > 2]
+        if len(non_url_words) < 3:
+            return True
     return False
 
 

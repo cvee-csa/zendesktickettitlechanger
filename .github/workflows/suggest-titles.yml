@@ -18,6 +18,7 @@ jobs:
   suggest-titles:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: prod
 
     steps:
       - name: Checkout repository
