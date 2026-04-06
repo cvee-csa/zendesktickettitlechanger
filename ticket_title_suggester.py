@@ -220,7 +220,8 @@ def handle_zendesk_rate_limit(response: requests.Response, attempt: int = 0):
 @retry_with_backoff()
 def fetch_open_tickets() -> list[dict]:
     tickets = []
-    query = "type:ticket status<solved"
+    group = os.environ.get("ZENDESK_GROUP", "IT-Operations")
+    query = f'type:ticket status<solved group:"{group}"'
     url = f"{ZENDESK_BASE_URL}/search.json"
     params = {"query": query, "sort_by": "created_at", "sort_order": "desc", "per_page": 100}
 

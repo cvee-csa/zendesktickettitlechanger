@@ -8,6 +8,11 @@ on:
         required: false
         default: "50"
         type: string
+      zendesk_group:
+        description: "Zendesk group to filter tickets (default: IT-Operations)"
+        required: false
+        default: "IT-Operations"
+        type: string
 
 jobs:
   suggest-titles:
@@ -33,6 +38,7 @@ jobs:
           ZENDESK_EMAIL: ${{ secrets.ZENDESK_EMAIL }}
           ZENDESK_API_TOKEN: ${{ secrets.ZENDESK_API_KEY }}
           MAX_TICKETS: ${{ inputs.max_tickets }}
+          ZENDESK_GROUP: ${{ inputs.zendesk_group }}
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: python ticket_title_suggester.py
