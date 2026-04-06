@@ -455,10 +455,29 @@ def is_automation_ticket(title: str, description: str) -> bool:
     return False
 
 
+def is_url_title(title: str) -> bool:
+    """Check if a title is primarily a URL or URL fragment."""
+    cleaned = title.strip()
+    # Matches full URLs, partial URLs, or URL-like strings
+    if re.match(r"^https?://", cleaned, re.IGNORECASE):
+        return True
+    if re.match(r"^www\.", cleaned, re.IGNORECASE):
+        return True
+    # URL that takes up most of the title (e.g. "see https://example.com/page")
+    url_match = re.search(r"https?://\S+", cleaned)
+    if url_match and len(url_match.group(0)) > len(cleaned) * 0.6:
+        return True
+    return False
+
+
 def is_vague_title(title: str) -> bool:
     """Check if a title is too vague/generic to be useful."""
     cleaned = title.strip().lower()
     cleaned = re.sub(r"^(re|fw|fwd)\s*:\s*", "", cleaned).strip()
+
+    # URL-based titles are always vague
+    if is_url_title(title):
+        return True
 
     # Exact match against vague titles
     if cleaned in VAGUE_TITLES:
@@ -487,8 +506,10 @@ def extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
     if not text:
         return []
 
-    # Strip HTML before processing
+    # Strip HTML and URLs before processing
     text = strip_html(text)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"www\.\S+", " ", text)
     text = redact_pii(text)
 
     # First, check for known product mentions
@@ -530,6 +551,10 @@ def extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
 
 def build_suggested_title(title: str, description: str, comments: list[dict]) -> str:
     """Build a suggested title from the ticket description and comments."""
+    # Strip URLs from title so they don't pollute keyword extraction
+    title_for_keywords = re.sub(r"https?://\S+", " ", title)
+    title_for_keywords = re.sub(r"www\.\S+", " ", title_for_keywords).strip()
+
     # Combine text sources
     all_text = description or ""
     for c in comments[:3]:
@@ -757,10 +782,14 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
                 "reason": reason,
             }
 
+    if is_url_title(current_title):
+        reason = "Title is a URL — needs a human-readable subject describing the actual request"
+    else:
+        reason = "Title is vague but no automatic suggestion could be generated — manual review recommended"
     return {
         "suggested_title": "",
         "status": "Needs Manual Review",
-        "reason": "Title is vague but no automatic suggestion could be generated — manual review recommended",
+        "reason": reason,
     }
 
 
@@ -772,6 +801,9 @@ def classify_vagueness_or_automation(title: str, description: str = "") -> str:
             if pattern.search(title.strip()):
                 return "Title is from an automated/notification email — needs a human-readable subject"
         return "Ticket body indicates this was auto-generated — title may not describe the actual issue"
+
+    if is_url_title(title):
+        return "Title is a URL — needs a human-readable subject describing the actual request"
 
     cleaned = title.strip().lower()
     cleaned = re.sub(r"^(re|fw|fwd)\s*:\s*", "", cleaned).strip()
