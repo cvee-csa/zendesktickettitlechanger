@@ -13,6 +13,7 @@ Guardrails:
 - Configurable max ticket cap
 - Log-only mode by default (no ticket modifications)
 - Title length and content validation on suggestions
+- Automation/notification email ticket detection
 """
 
 import os
@@ -96,6 +97,19 @@ def redact_pii(text: str) -> str:
     for pattern, replacement in PII_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
+
+
+def strip_html(text: str) -> str:
+    """Remove HTML tags and common HTML entities from text."""
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"&nbsp;?", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"&amp;?", " and ", text, flags=re.IGNORECASE)
+    text = re.sub(r"&lt;?", "<", text, flags=re.IGNORECASE)
+    text = re.sub(r"&gt;?", ">", text, flags=re.IGNORECASE)
+    text = re.sub(r"&quot;?", '"', text, flags=re.IGNORECASE)
+    text = re.sub(r"&#?\w+;", " ", text)  # any remaining HTML entities
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +225,7 @@ VAGUE_TITLES = {
     "re:", "fw:", "fwd:",
     "test", "testing", "test ticket",
     "ticket", "new ticket", "support ticket",
-    "inquiry", "general inquiry",
+    "inquiry", "general inquiry", "membership inquiry",
     "info", "information", "information needed",
     "assistance", "need assistance", "assistance needed",
     "account", "my account", "account issue", "account problem",
@@ -226,7 +240,72 @@ VAGUE_TITLES = {
     "broken", "something is broken",
     "none", "n/a", "na", "no subject", "(no subject)",
     "...", ".", "-", "--", "___",
+    # Common single-product vague titles
+    "csa training", "training", "csa", "star",
+    "receipt", "purchase", "order", "transaction",
+    "membership", "renewal", "subscription",
 }
+
+# Patterns that indicate automated/notification email ticket titles
+AUTOMATION_PATTERNS = [
+    # Purchase/transaction notifications
+    re.compile(r"^purchase\s+notification", re.IGNORECASE),
+    re.compile(r"^order\s+(confirmation|receipt|notification)", re.IGNORECASE),
+    re.compile(r"^payment\s+(confirmation|receipt|notification|received)", re.IGNORECASE),
+    re.compile(r"^transaction\s+(confirmation|receipt|notification)", re.IGNORECASE),
+    re.compile(r"^receipt\s+for\s+(your\s+)?purchase", re.IGNORECASE),
+    re.compile(r"^your\s+(order|purchase|payment|receipt)", re.IGNORECASE),
+    re.compile(r"^invoice\s+(#|number|for)", re.IGNORECASE),
+    # Auto-responders and system notifications
+    re.compile(r"^(auto[- ]?reply|automatic\s+reply|out\s+of\s+office)", re.IGNORECASE),
+    re.compile(r"^(undeliverable|delivery\s+(failure|status)|mail\s+delivery\s+failed)", re.IGNORECASE),
+    re.compile(r"^(do\s+not\s+reply|noreply|no-reply)", re.IGNORECASE),
+    re.compile(r"^(automated?\s+(message|notification|alert|email|response))", re.IGNORECASE),
+    re.compile(r"^(system\s+(notification|alert|message|update))", re.IGNORECASE),
+    re.compile(r"^(alert|notification)\s*:", re.IGNORECASE),
+    # Subscription/account notifications
+    re.compile(r"^(welcome\s+to|thank\s+you\s+for\s+(your\s+)?(order|purchase|registration|signing\s+up))", re.IGNORECASE),
+    re.compile(r"^(account\s+(created|activated|confirmation|verification))", re.IGNORECASE),
+    re.compile(r"^(password\s+(reset|changed|updated)\s+(request|confirmation|notification))", re.IGNORECASE),
+    re.compile(r"^(email\s+(verification|confirmation))", re.IGNORECASE),
+    re.compile(r"^(subscription|renewal)\s+(confirmation|notification|reminder)", re.IGNORECASE),
+    # Calendar/scheduling
+    re.compile(r"^(invitation|invite|accepted|declined|tentative)\s*:", re.IGNORECASE),
+    re.compile(r"^(meeting|calendar)\s+(invitation|update|cancellation)", re.IGNORECASE),
+    re.compile(r"^(reminder|scheduled)\s*:", re.IGNORECASE),
+    # Shipping/delivery
+    re.compile(r"^(shipping|delivery|tracking)\s+(confirmation|notification|update)", re.IGNORECASE),
+    re.compile(r"^your\s+(package|shipment|order)\s+(has\s+been\s+)?(shipped|delivered)", re.IGNORECASE),
+    # Marketing/newsletters
+    re.compile(r"^(newsletter|digest|weekly\s+update|monthly\s+update)", re.IGNORECASE),
+    re.compile(r"^(special\s+offer|promotion|discount|sale|deal)", re.IGNORECASE),
+    # Monitoring/CI/CD
+    re.compile(r"^\[?(build|deploy|ci|cd|jenkins|github|gitlab|jira|confluence)\]?\s*", re.IGNORECASE),
+    re.compile(r"^(uptime|downtime|monitoring|health\s+check)\s+(alert|notification)", re.IGNORECASE),
+]
+
+# Words/phrases in description that indicate automation-originated tickets
+AUTOMATION_BODY_SIGNALS = [
+    "this is an automated message",
+    "this is an auto-generated",
+    "this email was sent automatically",
+    "do not reply to this email",
+    "do not reply directly",
+    "this is a system generated",
+    "noreply@", "no-reply@", "donotreply@",
+    "automated notification",
+    "this message was generated",
+    "you are receiving this because",
+    "this is a confirmation of your",
+    "unsubscribe from these",
+    "manage your notification",
+    "notification preferences",
+    "purchase confirmation",
+    "order confirmation",
+    "payment receipt",
+    "transaction receipt",
+    "your receipt from",
+]
 
 # Words that don't help identify what the ticket is about
 STOP_WORDS = {
@@ -246,9 +325,30 @@ STOP_WORDS = {
     "dear", "sir", "madam", "team", "support", "help", "issue", "problem",
     "able", "unable", "trying", "try", "tried", "like", "know", "think",
     "still", "seem", "seems", "new", "using", "use", "used",
+    # PII redaction placeholders
     "email_redacted", "phone_redacted", "token_redacted",
     "ip_redacted", "ssn_redacted", "cc_redacted",
+    "redacted",
+    # HTML artifacts
+    "nbsp", "amp", "quot", "lt", "gt", "http", "https", "www", "com",
+    "org", "net", "html", "div", "span", "href", "img", "src", "alt",
+    "class", "style", "width", "height", "border", "padding", "margin",
+    "font", "color", "size", "table", "tbody", "thead", "col",
+    # Email boilerplate words
+    "sent", "received", "forwarded", "replied", "subject", "date",
+    "wrote", "message", "email", "mail",
+    # Generic filler
+    "really", "actually", "basically", "something", "anything", "everything",
+    "nothing", "someone", "anyone", "everyone", "thing", "things",
+    "way", "ways", "lot", "lots", "bit", "much", "many",
+    "going", "come", "came", "make", "made", "take", "took", "give", "gave",
+    "see", "saw", "say", "said", "tell", "told", "ask", "asked",
+    "work", "working", "look", "looking", "put", "keep", "let",
+    "begin", "began", "seem", "show", "showed",
 }
+
+# Words that look like personal names (short, capitalized) — filter from suggestions
+# We detect these dynamically rather than maintaining a list
 
 # Known products/features to boost in title suggestions
 KNOWN_PRODUCTS = [
@@ -260,12 +360,46 @@ KNOWN_PRODUCTS = [
     "STARWatch", "STAR Watch",
     "GRC Stack", "GRC", "Trusted Cloud Provider",
     "SOC 2", "ISO 27001", "ISO 27017", "ISO 27018",
-    "Shared Drive", "Google Drive", "SSO", "MFA", "API",
-    "Zendesk", "Dashboard", "Portal",
+    "TAISE", "Trusted AI Safety Expert",
 ]
 
 # Compile product patterns for matching (case-insensitive)
 PRODUCT_PATTERNS = [(re.compile(re.escape(p), re.IGNORECASE), p) for p in KNOWN_PRODUCTS]
+
+
+def is_likely_name(word: str) -> bool:
+    """Check if a word looks like a personal name (not a product/acronym)."""
+    if not word or len(word) < 2:
+        return False
+    # All-caps words are acronyms, not names
+    if word.isupper() and len(word) <= 6:
+        return False
+    # Check if it's a known product term
+    word_lower = word.lower()
+    for _, product in PRODUCT_PATTERNS:
+        if word_lower in product.lower().split():
+            return False
+    # Looks like a name: Capitalized, 3-12 chars, all alpha
+    if re.match(r"^[A-Z][a-z]{2,11}$", word):
+        return True
+    return False
+
+
+def is_automation_ticket(title: str, description: str) -> bool:
+    """Check if a ticket was created by an automation or notification email."""
+    # Check title against automation patterns
+    for pattern in AUTOMATION_PATTERNS:
+        if pattern.search(title.strip()):
+            return True
+
+    # Check description for automation signals
+    desc_lower = (description or "").lower()[:2000]
+    signal_count = sum(1 for signal in AUTOMATION_BODY_SIGNALS if signal in desc_lower)
+    # If 2+ signals found in the body, it's very likely automated
+    if signal_count >= 2:
+        return True
+
+    return False
 
 
 def is_vague_title(title: str) -> bool:
@@ -300,6 +434,8 @@ def extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
     if not text:
         return []
 
+    # Strip HTML before processing
+    text = strip_html(text)
     text = redact_pii(text)
 
     # First, check for known product mentions
@@ -309,8 +445,21 @@ def extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
             found_products.append(product_name)
 
     # Tokenize and count meaningful words
-    words = re.findall(r"[a-zA-Z]{3,}", text.lower())
-    meaningful = [w for w in words if w not in STOP_WORDS and len(w) > 2]
+    words = re.findall(r"[a-zA-Z]{3,}", text)
+    # Filter: stop words, redaction artifacts, likely names, HTML remnants
+    meaningful = []
+    for w in words:
+        w_lower = w.lower()
+        if w_lower in STOP_WORDS:
+            continue
+        if len(w_lower) <= 2:
+            continue
+        if "redacted" in w_lower:
+            continue
+        if is_likely_name(w):
+            continue
+        meaningful.append(w_lower)
+
     word_counts = Counter(meaningful)
 
     # Get top keywords (excluding product names already found)
@@ -335,7 +484,7 @@ def build_suggested_title(title: str, description: str, comments: list[dict]) ->
         if body:
             all_text += " " + body
 
-    all_text = all_text[:3000]  # Cap text length
+    all_text = strip_html(all_text[:3000])
 
     # Extract keywords
     keywords = extract_keywords(all_text)
@@ -344,7 +493,7 @@ def build_suggested_title(title: str, description: str, comments: list[dict]) ->
         return ""
 
     # Check for common action patterns in the description
-    desc_lower = (description or "").lower()[:1500]
+    desc_clean = strip_html((description or "")[:1500]).lower()
     action = ""
 
     action_patterns = [
@@ -352,7 +501,7 @@ def build_suggested_title(title: str, description: str, comments: list[dict]) ->
          "Cannot {match}"),
         (r"(need|want|would like|requesting|request)\s+(?:to\s+)?(add|remove|change|update|reset|create|delete|modify|enable|disable|upgrade|renew|transfer|consolidate)",
          "Request to {match}"),
-        (r"(how|where)\s+(?:do|can|to)\s+(.*?)[\?\.]",
+        (r"(how|where)\s+(?:do|can|to)\s+(\w+(?:\s+\w+){0,3})",
          "Question: How to {match}"),
         (r"(error|failed|failure|crash|broken|bug|not working|doesn'?t work|isn'?t working)",
          "Error"),
@@ -361,58 +510,94 @@ def build_suggested_title(title: str, description: str, comments: list[dict]) ->
         (r"(invoice|billing|charge|payment|refund|credit)",
          "Billing inquiry"),
         (r"(certificate|certification|exam|badge|credential)",
-         "Certification"),
+         "Certification inquiry"),
         (r"(registry|listing|profile|entry)",
-         "Registry/listing"),
+         "Registry/listing inquiry"),
     ]
 
     for pattern, template in action_patterns:
-        match = re.search(pattern, desc_lower)
+        match = re.search(pattern, desc_clean)
         if match:
             if "{match}" in template:
-                # Get the matched action words
                 groups = match.groups()
                 relevant = groups[-1] if len(groups) > 1 else groups[0]
-                action = template.replace("{match}", relevant.strip())
+                # Clean the matched text
+                relevant = relevant.strip()
+                # Remove any PII-looking or junk words from the match
+                clean_words = [w for w in relevant.split()
+                               if w.lower() not in STOP_WORDS
+                               and "redacted" not in w.lower()
+                               and not is_likely_name(w.capitalize())]
+                if clean_words:
+                    action = template.replace("{match}", " ".join(clean_words))
+                else:
+                    action = template.split("{")[0].strip()
             else:
                 action = template
             break
 
     # Build the title
     products = [k for k in keywords if any(p == k for _, p in PRODUCT_PATTERNS)]
-    other_keywords = [k for k in keywords if k not in products][:4]
+    other_keywords = [k for k in keywords if k not in products
+                      and "redacted" not in k.lower()
+                      and not is_likely_name(k.capitalize())][:4]
 
     if products and action:
-        title = f"{products[0]}: {action}"
+        suggested = f"{products[0]}: {action}"
     elif products:
         context = " ".join(other_keywords[:3]).capitalize() if other_keywords else "inquiry"
-        title = f"{products[0]} — {context}"
+        suggested = f"{products[0]} — {context}"
     elif action:
         context = " ".join(other_keywords[:3]) if other_keywords else ""
-        title = f"{action}" + (f" — {context}" if context else "")
+        if context:
+            suggested = f"{action} — {context}"
+        else:
+            suggested = action
     else:
         # Fallback: just use top keywords
-        title = " ".join(other_keywords[:5]).capitalize()
+        suggested = " ".join(other_keywords[:5]).capitalize()
 
-    # Clean up the title
-    title = title.strip(" —-:")
-    title = re.sub(r"\s+", " ", title)
+    # Final cleanup
+    suggested = suggested.strip(" —-:")
+    suggested = re.sub(r"\s+", " ", suggested)
+    # Remove any remaining redaction markers
+    suggested = re.sub(r"\[?\w*_?REDACTED\]?", "", suggested, flags=re.IGNORECASE).strip()
+    suggested = re.sub(r"\s+", " ", suggested).strip(" —-:")
 
     # Capitalize first letter
-    if title:
-        title = title[0].upper() + title[1:]
+    if suggested:
+        suggested = suggested[0].upper() + suggested[1:]
 
     # Enforce max length
-    if len(title) > 100:
-        title = title[:97] + "..."
+    if len(suggested) > 100:
+        suggested = suggested[:97] + "..."
 
-    return title if len(title) >= 10 else ""
+    return suggested if len(suggested) >= 10 else ""
 
 
 def suggest_title(ticket: dict, comments: list[dict]) -> dict:
     """Analyze a ticket title using heuristic rules and suggest improvements."""
     current_title = ticket.get("subject", ticket.get("raw_subject", ""))
     description = ticket.get("description", "")
+
+    # Check for automation/notification tickets first
+    if is_automation_ticket(current_title, description):
+        # Try to build a better title from the content
+        suggested = build_suggested_title(current_title, description, comments)
+        reason = classify_vagueness_or_automation(current_title, description)
+        if suggested and suggested.lower() != current_title.lower():
+            validated = validate_suggestion(suggested, ticket["id"])
+            if validated:
+                return {
+                    "suggested_title": validated,
+                    "status": "Suggestion",
+                    "reason": reason,
+                }
+        return {
+            "suggested_title": "",
+            "status": "Suggestion",
+            "reason": reason,
+        }
 
     if not is_vague_title(current_title):
         # Title seems descriptive enough — keep it
@@ -429,7 +614,7 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
         # Validate the suggestion
         validated = validate_suggestion(suggested, ticket["id"])
         if validated:
-            reason = classify_vagueness(current_title)
+            reason = classify_vagueness_or_automation(current_title, description)
             return {
                 "suggested_title": validated,
                 "status": "Suggestion",
@@ -443,8 +628,15 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
     }
 
 
-def classify_vagueness(title: str) -> str:
+def classify_vagueness_or_automation(title: str, description: str = "") -> str:
     """Return a human-readable reason why the title was flagged."""
+    # Check automation first
+    if is_automation_ticket(title, description):
+        for pattern in AUTOMATION_PATTERNS:
+            if pattern.search(title.strip()):
+                return "Title is from an automated/notification email — needs a human-readable subject"
+        return "Ticket body indicates this was auto-generated — title may not describe the actual issue"
+
     cleaned = title.strip().lower()
     cleaned = re.sub(r"^(re|fw|fwd)\s*:\s*", "", cleaned).strip()
 
@@ -497,6 +689,11 @@ def validate_suggestion(suggestion: str, ticket_id: int) -> str | None:
                 "Ticket #%s: Suggestion appears to contain PII, skipping.", ticket_id,
             )
             return None
+
+    # Also reject if redaction markers leaked through
+    if re.search(r"redacted", suggestion, re.IGNORECASE):
+        logger.warning("Ticket #%s: Suggestion contains redaction markers, skipping.", ticket_id)
+        return None
 
     return suggestion
 
@@ -863,7 +1060,7 @@ def main():
         if status == "Suggestion":
             suggestion_count += 1
             recommendation = "Update Title"
-            logger.info("  \u2192 Suggested: %s", suggested_title)
+            logger.info("  \u2192 Suggested: %s", suggested_title if suggested_title else "(flag only — no auto-suggestion)")
         elif status == "Error":
             errors += 1
             recommendation = "Review Manually"
@@ -903,7 +1100,7 @@ def main():
         if row["Status"] == "Suggestion":
             print(f"\nTicket #{row['Ticket #']}  {row['Ticket URL']}")
             print(f"  Current:   {row['Current Title']}")
-            print(f"  Suggested: {row['Suggested Title']}")
+            print(f"  Suggested: {row['Suggested Title'] or '(review needed — no auto-suggestion)'}")
             print(f"  Reason:    {row['Reason']}")
 
     print("\n" + "=" * 80)
