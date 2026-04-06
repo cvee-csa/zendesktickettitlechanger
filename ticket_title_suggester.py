@@ -83,7 +83,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 PII_PATTERNS = [
-    (re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"), "[EMAIL_REDACTED]"),
+    (re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-.]+)?"), "[EMAIL_REDACTED]"),
     (re.compile(r"\b(\+?1?[-.\\s]?)?\(?\d{3}\)?[-.\\s]?\d{3}[-.\\s]?\d{4}\b"), "[PHONE_REDACTED]"),
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[SSN_REDACTED]"),
     (re.compile(r"\b\d{4}[-\\s]?\d{4}[-\\s]?\d{4}[-\\s]?\d{4}\b"), "[CC_REDACTED]"),
@@ -292,6 +292,9 @@ AUTOMATION_PATTERNS = [
     # Monitoring/CI/CD
     re.compile(r"^\[?(build|deploy|ci|cd|jenkins|github|gitlab|jira|confluence)\]?\s*", re.IGNORECASE),
     re.compile(r"^(uptime|downtime|monitoring|health\s+check)\s+(alert|notification)", re.IGNORECASE),
+    # Contact form submissions
+    re.compile(r"^a\s+\w+\s+contact\s+form", re.IGNORECASE),
+    re.compile(r"contact\s+form\s+has\s+been\s+(filed|submitted|received)", re.IGNORECASE),
 ]
 
 # Words/phrases in description that indicate automation-originated tickets
@@ -315,6 +318,8 @@ AUTOMATION_BODY_SIGNALS = [
     "payment receipt",
     "transaction receipt",
     "your receipt from",
+    "form has been received from",
+    "contact form submission",
 ]
 
 # Words that don't help identify what the ticket is about
@@ -577,6 +582,28 @@ def build_suggested_title(title: str, description: str, comments: list[dict]) ->
     # Capitalize first letter
     if suggested:
         suggested = suggested[0].upper() + suggested[1:]
+
+    # Check for incomplete suggestions (Issues 3 & 4)
+    # Reject if too short, too generic, or ends with incomplete phrase
+    if len(suggested) < 15:
+        return ""
+    
+    incomplete_endings = ("to", "how to", "how", "what", "where", "for", "about", "with", "cannot")
+    if any(suggested.lower().endswith(ending) for ending in incomplete_endings):
+        return ""
+    
+    # Check for broken/generic patterns like "Cannot" alone or "Question: How to" without object
+    if suggested.lower() in ("cannot", "error", "question", "error: ") \
+            or (suggested.lower().startswith(("question: how to", "cannot ")) and len(suggested) < 25):
+        return ""
+
+    # Check for multiple emails in body indicating list/table (Issue 5)
+    if description:
+        email_count = len(re.findall(r"\w+@\w+", description))
+        title_word_count = len(title.split())
+        # If many emails but vague/short title, skip suggestion
+        if email_count >= 3 and title_word_count <= 3:
+            return ""
 
     # Enforce max length
     if len(suggested) > 100:
