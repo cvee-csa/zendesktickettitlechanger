@@ -122,6 +122,43 @@ def strip_html(text: str) -> str:
     return text.strip()
 
 
+def clean_subject_line(title: str) -> str:
+    """Strip Re:/Fwd: chains, bracketed prefixes, and org suffixes from subject."""
+    if not title:
+        return title
+    cleaned = re.sub(
+        r"^(?:(?:re|fw|fwd)\s*:\s*(?:\[.*?\]\s*)?)+", "", title, flags=re.IGNORECASE
+    ).strip()
+    cleaned = re.sub(r"\[CloudSecurityAlliance\]\s*", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"\s*[-–—]\s*Cloud Security Alliance\s*$", "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Spam / marketing detection
+# ---------------------------------------------------------------------------
+
+SPAM_PATTERNS = [
+    re.compile(r"(seo|guest\s*post|backlink|link\s*building|content\s*collaboration)", re.IGNORECASE),
+    re.compile(r"(visitor\s*list|attendee\s*list)\s*(for|of|revealed|uncovered)", re.IGNORECASE),
+    re.compile(r"(real\s*estate|dormitory|accommodation)\s*(available|opportunity|promotion|sites)", re.IGNORECASE),
+    re.compile(r"(high\s*authority|da\s*\d+|domain\s*authority)", re.IGNORECASE),
+    re.compile(r"plan\s*your\s*visit\s*to", re.IGNORECASE),
+    re.compile(r"(amazing|incredible|exclusive)\s*(content|collaboration|opportunity)", re.IGNORECASE),
+    re.compile(r"elevate\s+your\s+.{0,20}\s*seo", re.IGNORECASE),
+    re.compile(r"(guest\s*post|sponsored\s*post|paid\s*post)\s*(opportunity|inquiry|proposal)", re.IGNORECASE),
+]
+
+
+def is_spam_ticket(title: str, description: str) -> bool:
+    """Check if a ticket is spam/marketing based on title and body patterns."""
+    text = f"{title} {(description or '')[:500]}"
+    for pattern in SPAM_PATTERNS:
+        if pattern.search(text):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Retry logic
 # ---------------------------------------------------------------------------
@@ -512,6 +549,25 @@ def build_suggested_title(title: str, description: str, comments: list[dict]) ->
     action = ""
 
     action_patterns = [
+        # Token/voucher issues (very common for CSA)
+        (r"(?:have not|haven'?t|did not|didn'?t|never)\s+(?:received?|got|get)\s+(?:(?:my|the|an?)\s+)?(token|voucher|exam|certificate|badge|receipt|confirmation|access|login)",
+         "Not received: {match}"),
+        # Where/how to find things
+        (r"(?:where|how)\s+(?:can|do)\s+i\s+(?:find|get|download|access|view|see|locate|retrieve)\s+(?:(?:my|the|an?)\s+)?(token|voucher|exam|certificate|receipt|course|training|badge)",
+         "Question: How to find {match}"),
+        # Purchase followed by issue
+        (r"i\s+(?:purchased|bought|paid\s+for|ordered)\s+(?:(?:the|a|an)\s+)?(.+?)(?:\s+(?:but|and|however|yet)\s+)",
+         "Purchased — {match}"),
+        # Can't find specific things
+        (r"(?:can'?t|cannot|unable\s+to|couldn'?t)\s+(?:find|locate|see|view)\s+(?:(?:my|the|an?)\s+)?(token|voucher|exam|certificate|receipt|course|account|login)",
+         "Cannot find {match}"),
+        # Credential/account status issues
+        (r"(?:my|the)\s+(certificate|exam|token|voucher|badge|account|login|password|access|membership)\s+(?:is|has|was)\s+(expired?|missing|invalid|wrong|incorrect|locked|blocked|suspended)",
+         "{match} issue"),
+        # Receipt/refund requests
+        (r"(?:need|want|would\s+like|requesting?)\s+(?:a\s+)?(receipt|invoice|refund|credit|reimbursement|proof\s+of\s+purchase)",
+         "Request: {match}"),
+        # Original patterns
         (r"(can't|cannot|unable to|couldn't|could not)\s+(access|log\s*in|sign\s*in|connect|view|open|download|upload|use|find|see|load|reach)",
          "Cannot {match}"),
         (r"(need|want|would like|requesting|request)\s+(?:to\s+)?(add|remove|change|update|reset|create|delete|modify|enable|disable|upgrade|renew|transfer|consolidate)",
@@ -530,15 +586,15 @@ def build_suggested_title(title: str, description: str, comments: list[dict]) ->
          "Registry/listing inquiry"),
     ]
 
+    _articles = {"a", "an", "the", "my", "your", "our", "their"}
+
     for pattern, template in action_patterns:
         match = re.search(pattern, desc_clean)
         if match:
             if "{match}" in template:
-                groups = match.groups()
-                relevant = groups[-1] if len(groups) > 1 else groups[0]
-                # Clean the matched text
+                groups = [g for g in match.groups() if g and g.strip() not in _articles]
+                relevant = groups[-1] if groups else ""
                 relevant = relevant.strip()
-                # Remove any PII-looking or junk words from the match
                 clean_words = [w for w in relevant.split()
                                if w.lower() not in STOP_WORDS
                                and "redacted" not in w.lower()
@@ -617,6 +673,9 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
     current_title = ticket.get("subject", ticket.get("raw_subject", ""))
     description = ticket.get("description", "")
 
+    # Clean subject for analysis (preserve original for report)
+    cleaned_title = clean_subject_line(current_title)
+
     # Check for PII in title FIRST
     if title_contains_pii(current_title):
         return {
@@ -625,23 +684,43 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
             "reason": "Current title contains personal information (email/phone) that should be removed",
         }
 
+    # Check for spam/marketing tickets
+    if is_spam_ticket(cleaned_title, description):
+        return {
+            "suggested_title": "",
+            "status": "Likely Spam",
+            "reason": "Title matches spam/marketing patterns — likely not a real support ticket",
+        }
+
     # Check for automation/notification tickets
-    if is_automation_ticket(current_title, description):
-        # Try to extract product name from the original title
-        product_match = re.search(r"purchase notification for (.+)", current_title, re.IGNORECASE)
-        if product_match:
-            product_name = product_match.group(1).strip()
-            suggested = f"{product_name} — Purchase Notification"
-            return {
-                "suggested_title": suggested,
-                "status": "Suggestion",
-                "reason": "Title is from an automated/notification email — needs a human-readable subject",
-            }
-        
+    if is_automation_ticket(cleaned_title, description):
+        # Try to extract product name from multiple automation title formats
+        _automation_extractors = [
+            (re.compile(r"purchase notification for (.+)", re.IGNORECASE), "Purchase Notification"),
+            (re.compile(r"registration notification for (.+)", re.IGNORECASE), "Registration"),
+            (re.compile(r"(?:fwd?:\s*)?your purchase of (.+)", re.IGNORECASE), "Purchase Notification"),
+            (re.compile(r"receipt for (?:your )?(?:purchase of )?(.+)", re.IGNORECASE), "Receipt"),
+            (re.compile(r"order confirmation[:\s]+(.+)", re.IGNORECASE), "Order Confirmation"),
+            (re.compile(r"payment of \$[\d.,]+ from .+ for (.+)", re.IGNORECASE), "Payment Received"),
+        ]
+        for pat, notif_type in _automation_extractors:
+            m = pat.search(current_title)
+            if m:
+                product_name = m.group(1).strip()
+                product_name = re.sub(r"\s*[-–—]\s*Cloud Security Alliance\s*$", "", product_name).rstrip(".")
+                if len(product_name) > 80:
+                    product_name = product_name[:77] + "..."
+                suggested = f"{product_name} — {notif_type}"
+                return {
+                    "suggested_title": suggested,
+                    "status": "Suggestion",
+                    "reason": "Title is from an automated/notification email — needs a human-readable subject",
+                }
+
         # Try to build a better title from the content
-        suggested = build_suggested_title(current_title, description, comments)
-        reason = classify_vagueness_or_automation(current_title, description)
-        if suggested and suggested.lower() != current_title.lower():
+        suggested = build_suggested_title(cleaned_title, description, comments)
+        reason = classify_vagueness_or_automation(cleaned_title, description)
+        if suggested and suggested.lower() != cleaned_title.lower():
             validated = validate_suggestion(suggested, ticket["id"])
             if validated:
                 return {
@@ -655,7 +734,7 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
             "reason": reason,
         }
 
-    if not is_vague_title(current_title):
+    if not is_vague_title(cleaned_title):
         # Title seems descriptive enough — keep it
         return {
             "suggested_title": "",
@@ -664,13 +743,13 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
         }
 
     # Title is vague — try to build a better one
-    suggested = build_suggested_title(current_title, description, comments)
+    suggested = build_suggested_title(cleaned_title, description, comments)
 
-    if suggested and suggested.lower() != current_title.lower():
+    if suggested and suggested.lower() != cleaned_title.lower():
         # Validate the suggestion
         validated = validate_suggestion(suggested, ticket["id"])
         if validated:
-            reason = classify_vagueness_or_automation(current_title, description)
+            reason = classify_vagueness_or_automation(cleaned_title, description)
             return {
                 "suggested_title": validated,
                 "status": "Suggestion",
@@ -765,12 +844,14 @@ KEEP_FILL     = "F5F5F5";  ALT_KEEP     = "FAFAFA"
 ERROR_FILL    = "FFE8E8";  ALT_ERROR    = "FFF0F0"
 SKIP_FILL     = "FFF9C4";  ALT_SKIP     = "FFFDE7"
 PII_FILL      = "FFF3E0";  ALT_PII      = "FFF8E8"
+SPAM_FILL     = "EEEEEE";  ALT_SPAM     = "F5F5F5"
 LINK_COLOR    = "1155CC"
 SUGGEST_BADGE = "27AE60"
 KEEP_BADGE    = "7F8C8D"
 ERROR_BADGE   = "C0392B"
 SKIP_BADGE    = "F57F17"
 PII_BADGE     = "E65100"
+SPAM_BADGE    = "9E9E9E"
 
 HEADERS = [
     "Ticket #", "Status", "Current Title", "Suggested Title",
@@ -807,6 +888,8 @@ def _status_colors(status):
         return (PII_FILL, ALT_PII, PII_BADGE)
     elif status == "Needs Manual Review":
         return (SKIP_FILL, ALT_SKIP, SKIP_BADGE)
+    elif status == "Likely Spam":
+        return (SPAM_FILL, ALT_SPAM, SPAM_BADGE)
     return (KEEP_FILL, ALT_KEEP, KEEP_BADGE)
 
 
@@ -969,6 +1052,7 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
         ("Vague Titles", vague_count),
         ("PII in Title", pii_count),
         ("Needs Manual Review", run_meta.get("manual_reviews", 0)),
+        ("Spam/Marketing", run_meta.get("spam_flagged", 0)),
     ]
     for label, val in breakdown_items:
         es.cell(row=row_num, column=1, value=label).font = Font(
@@ -1115,6 +1199,7 @@ def main():
     suggestion_count = 0
     keep_count = 0
     manual_review_count = 0
+    spam_count = 0
     errors = 0
 
     for i, ticket in enumerate(tickets, 1):
@@ -1166,6 +1251,10 @@ def main():
             manual_review_count += 1
             recommendation = "Review Manually"
             logger.info("  → Needs manual review: vague title with no auto-suggestion")
+        elif status == "Likely Spam":
+            spam_count += 1
+            recommendation = "Likely Spam"
+            logger.info("  → Likely spam/marketing ticket")
         elif status == "Error":
             errors += 1
             recommendation = "Review Manually"
@@ -1197,6 +1286,7 @@ def main():
     print(f"Suggestions made: {suggestion_count}")
     print(f"Titles kept: {keep_count}")
     print(f"Manual reviews needed: {manual_review_count}")
+    print(f"Spam/marketing flagged: {spam_count}")
     print(f"Errors encountered: {errors}")
     print(f"Engine: Rule-based heuristics (no AI API)")
     print(f"PII redaction: enabled")
@@ -1217,6 +1307,7 @@ def main():
         "suggestions_made": suggestion_count,
         "titles_kept": keep_count,
         "manual_reviews": manual_review_count,
+        "spam_flagged": spam_count,
         "errors": errors,
     }
 
