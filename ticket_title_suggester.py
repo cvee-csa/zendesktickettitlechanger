@@ -477,6 +477,11 @@ def is_automation_ticket(title: str, description: str) -> bool:
 # Pass 1: action-based patterns (title only) — what is the requester DOING?
 _ACTION_PATTERNS = [
     # STAR/Registry — very specific program, always wins
+    # Notification — automated/scheduled task alerts (match before anything else)
+    ("Notification", [
+        re.compile(r"^Notification\s*:", re.IGNORECASE),
+        re.compile(r"^(?:Alert|Reminder|Scheduled\s+Task)\s*:", re.IGNORECASE),
+    ]),
     ("STAR/Registry", [
         re.compile(r"\b(star\s+registry|star\s+level|star\s+attestation|starwatch|caiq|ccm|grc\s+stack|trusted\s+cloud)\b", re.IGNORECASE),
         re.compile(r"\bstar\s+(report|review|submission|listing|entry|profile)\b", re.IGNORECASE),
