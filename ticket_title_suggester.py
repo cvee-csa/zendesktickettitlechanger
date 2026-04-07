@@ -504,6 +504,7 @@ CATEGORY_PATTERNS = [
         re.compile(r"(config|setting|setup|enable|disable|toggle|update|modify|change)\s+.{0,30}(setting|config|option|feature|flag|policy|rule)", re.IGNORECASE),
         re.compile(r"(redirect|rewrite|iframe|embed|seo|sitemap|robots\.txt|index)", re.IGNORECASE),
         re.compile(r"(workflow|automation|trigger|schedule|cron|sla\s+polic)", re.IGNORECASE),
+        re.compile(r"(set\s*up|creat|build|configur)\w*\s+.{0,30}(form|page|template|landing|portal|widget)", re.IGNORECASE),
     ]),
     ("Documentation", [
         re.compile(r"(document|documentation|wiki|guide|readme|runbook|playbook|knowledge\s+base|kb)\b", re.IGNORECASE),
@@ -779,6 +780,116 @@ def build_suggested_title(title: str, description: str, comments: list[dict]) ->
     return suggested if len(suggested) >= 10 else ""
 
 
+# Phrases that are meta-commentary about ticket creation, not the actual request
+_META_COMMENTARY_PATTERNS = [
+    re.compile(r"(?:I\s+)?(?:never\s+)?(?:did|didn'?t)\s+find\s+a\s+ticket", re.IGNORECASE),
+    re.compile(r"(?:did\s+we|have\s+we)\s+creat\w*\s+a\s+ticket", re.IGNORECASE),
+    re.compile(r"(?:I\s+am|I'?m)\s+creat(?:ing|e)\s+(?:a\s+)?(?:this|one|ticket|request)", re.IGNORECASE),
+    re.compile(r"(?:opening|submitting|filing|raising)\s+(?:this|a)\s+(?:ticket|request|issue)", re.IGNORECASE),
+    # NOTE: "as discussed" is handled as a strippable prefix, not a full skip
+    re.compile(r"(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))\b[,.]?\s*(?:team|all|everyone|there)?", re.IGNORECASE),
+    re.compile(r"hope\s+(?:this|you|all\s+is)", re.IGNORECASE),
+    re.compile(r"please\s+(?:see|find)\s+(?:below|attached|the\s+(?:below|attached))", re.IGNORECASE),
+    re.compile(r"(?:I\s+)?(?:want|would\s+like)\s+to\s+(?:report|flag|bring\s+to)", re.IGNORECASE),
+    re.compile(r"^(?:hi|hello|hey|dear)\s+", re.IGNORECASE),
+    re.compile(r"following\s+up\s+on", re.IGNORECASE),
+    re.compile(r"(?:this\s+is|here\s+is)\s+(?:a\s+)?(?:follow.?up|reminder|request)", re.IGNORECASE),
+    re.compile(r"thank\s+you\s+(?:for|in\s+advance)", re.IGNORECASE),
+    re.compile(r"^(?:please\s+)?(?:can\s+you|could\s+you)\s+(?:please\s+)?(?:help|assist)\b", re.IGNORECASE),
+    re.compile(r"^apologi(?:es|ze)", re.IGNORECASE),
+    re.compile(r"(?:could\s+not|couldn'?t|cannot|can'?t)\s+find\s+a?\s*(?:related|existing)?\s*ticket", re.IGNORECASE),
+    re.compile(r"I\s+was\s+just\s+looking\s+at", re.IGNORECASE),
+]
+
+
+def _is_meta_sentence(sentence: str) -> bool:
+    """Check if a sentence is meta-commentary rather than the actual request."""
+    for pat in _META_COMMENTARY_PATTERNS:
+        if pat.search(sentence):
+            return True
+    return False
+
+
+def _build_best_effort_title(category: str, title: str, description: str, comments: list[dict]) -> str:
+    """Build a best-effort title for tickets that failed normal suggestion.
+
+    Uses a relaxed approach: extract the most meaningful phrases from the
+    description and combine with the detected category.  The result is
+    intended as a *starting point* for human review, not a final answer.
+    """
+    desc = (description or "")[:3000]
+    # Strip HTML but preserve newlines for signature detection
+    desc = re.sub(r"<br\s*/?>", "\n", desc, flags=re.IGNORECASE)
+    desc = re.sub(r"<[^>]+>", " ", desc)
+    desc = re.sub(r"&nbsp;?", " ", desc, flags=re.IGNORECASE)
+    desc = re.sub(r"&amp;?", " and ", desc, flags=re.IGNORECASE)
+    desc = re.sub(r"&#?\w+;", " ", desc)
+    # Strip URLs
+    desc = re.sub(r"https?://\S+", " ", desc)
+    desc = re.sub(r"www\.\S+", " ", desc)
+    # Strip email attribution lines ("On <date> <name> wrote:")
+    desc = re.sub(r"On\s+\w{3},\s+\w{3}\s+\d{1,2},\s+\d{4}\s+at\s+.{0,80}wrote:", "\n", desc, flags=re.IGNORECASE)
+    # Strip email headers and forwarded message markers
+    desc = re.sub(r"^\s*-+\s*Forwarded message\s*-+\s*$", "\n", desc, flags=re.MULTILINE | re.IGNORECASE)
+    desc = re.sub(r"^\s*(?:From|To|Subject|Date|Cc|Bcc):\s+.*$", "\n", desc, flags=re.MULTILINE)
+    # Strip signature blocks: lines with job titles, org names, contact info
+    desc = re.sub(r"^\s*(?:Technology|Vice\s+President|Director|Manager|Content\s+Development|Senior|Lead|Chief|Head\s+of)\b.*$", "\n", desc, flags=re.MULTILINE)
+    desc = re.sub(r"^\s*Cloud Security Alliance\s*$", "\n", desc, flags=re.MULTILINE)
+    desc = re.sub(r"^\s*[pe]:\s*(?:\+?\d[\d\s.()\-]+|\S+@\S+)\s*$", "\n", desc, flags=re.MULTILINE)
+    desc = re.sub(r"^\s*[me]:\s*(?:\+?\d[\d\s.()\-]+|\S+@\S+)\s*$", "\n", desc, flags=re.MULTILINE)
+    # Strip standalone name lines (2-3 capitalized words on own line, common in sigs)
+    desc = re.sub(r"^\s*[A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s*$", "\n", desc, flags=re.MULTILINE)
+    # Strip signature dividers and boilerplate
+    desc = re.sub(r"[-–—]{2,}.*", "\n", desc)
+    desc = re.sub(r"(?:^|\n)\s*(?:Sent from|Submitted from|Get Outlook|Cheers|Best|Regards|Thanks)[\s,]*(?:\n|$)", "\n", desc, flags=re.IGNORECASE)
+
+    # Strippable meta-prefixes: "As discussed last week, ..." → keep the rest
+    _PREFIX_STRIP = re.compile(
+        r"^(?:as\s+(?:discussed|mentioned|per\s+our\s+\w+)\s+(?:last\s+week|earlier|yesterday|today|on\s+\w+day)"
+        r"[,;]?\s*(?:I\s+)?(?:wanted?\s+to\s+(?:chat\s+on|discuss|talk\s+about|ask\s+about)\s*)?)",
+        re.IGNORECASE,
+    )
+
+    # Try to grab the first meaningful non-meta sentence
+    sentences = re.split(r"[.\n!?]+", desc)
+    best_sentence = ""
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        # Skip meta-commentary (greetings, "I'm creating a ticket", etc.)
+        if _is_meta_sentence(s):
+            continue
+        # Strip meta-prefixes but keep the actionable remainder
+        s = _PREFIX_STRIP.sub("", s).strip()
+        words = [w for w in s.split() if w.lower() not in STOP_WORDS and len(w) > 2
+                 and "redacted" not in w.lower()]
+        if len(words) >= 3:
+            # Truncate to reasonable length
+            best_sentence = s.strip()
+            if len(best_sentence) > 70:
+                best_sentence = best_sentence[:67].rsplit(" ", 1)[0] + "..."
+            break
+
+    if not best_sentence:
+        # Fall back to top keywords
+        keywords = extract_keywords(desc)
+        if keywords:
+            best_sentence = " ".join(keywords[:5]).capitalize()
+
+    if not best_sentence:
+        return ""
+
+    # Clean up: capitalize first letter, strip trailing punctuation artifacts
+    best_sentence = best_sentence[0].upper() + best_sentence[1:] if best_sentence else ""
+    best_sentence = best_sentence.rstrip(" ,;:-–—")
+
+    suggested = f"[{category}] {best_sentence}"
+    if len(suggested) > 100:
+        suggested = suggested[:97] + "..."
+    return suggested
+
+
 def suggest_title(ticket: dict, comments: list[dict]) -> dict:
     """Analyze a ticket title using heuristic rules and suggest improvements."""
     current_title = ticket.get("subject", ticket.get("raw_subject", ""))
@@ -847,11 +958,21 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
         }
 
     if not is_vague_title(cleaned_title):
-        # Title seems descriptive enough — keep it
+        # Title is descriptive — but suggest a category prefix if it doesn't have one
+        if not re.match(r"^\[.+?\]", cleaned_title):
+            category = detect_category(cleaned_title, description)
+            prefixed = f"[{category}] {cleaned_title}"
+            if len(prefixed) > 100:
+                prefixed = prefixed[:97] + "..."
+            return {
+                "suggested_title": prefixed,
+                "status": "Suggestion",
+                "reason": f"Adding [{category}] prefix for triage — original title is descriptive",
+            }
         return {
             "suggested_title": "",
             "status": "Keep Current",
-            "reason": "Title is already descriptive",
+            "reason": "Title is already descriptive and categorized",
         }
 
     # Title is vague — try to build a better one
@@ -868,12 +989,16 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
                 "reason": reason,
             }
 
+    # Generate a best-effort suggestion for manual review
+    category = detect_category(cleaned_title, description)
+    best_effort = _build_best_effort_title(category, cleaned_title, description, comments)
+
     if is_url_title(current_title):
-        reason = "Title is a URL — needs a human-readable subject describing the actual request"
+        reason = "Title is a URL — suggested title is a best-effort guess and should be reviewed"
     else:
-        reason = "Title is vague but no automatic suggestion could be generated — manual review recommended"
+        reason = "Title is vague — suggested title is a best-effort guess and should be reviewed"
     return {
-        "suggested_title": "",
+        "suggested_title": best_effort,
         "status": "Needs Manual Review",
         "reason": reason,
     }
