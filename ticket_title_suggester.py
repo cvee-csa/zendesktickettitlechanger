@@ -459,78 +459,161 @@ def is_automation_ticket(title: str, description: str) -> bool:
 # Category detection for suggested titles
 # ---------------------------------------------------------------------------
 
-CATEGORY_PATTERNS = [
-    # Order matters — first match wins, so put more specific patterns first
-    # Product/program-specific categories go first to avoid generic matches
+# ---------------------------------------------------------------------------
+# Two-pass category detection
+#
+# PASS 1 ("action patterns") — matched against the TITLE only.
+#   These detect the *intent* of the ticket (access request, policy/doc work,
+#   reporting, etc.) and take priority over tool-name mentions.
+#
+# PASS 2 ("context patterns") — matched against title + description.
+#   These detect the *subject area* (specific program, tool, infra component)
+#   and act as a fallback when no action pattern matched.
+#
+# Order within each pass still matters (first match wins).
+# ---------------------------------------------------------------------------
+
+# Pass 1: action-based patterns (title only) — what is the requester DOING?
+_ACTION_PATTERNS = [
+    # STAR/Registry — very specific program, always wins
     ("STAR/Registry", [
         re.compile(r"\b(star\s+registry|star\s+level|star\s+attestation|starwatch|caiq|ccm|grc\s+stack|trusted\s+cloud)\b", re.IGNORECASE),
         re.compile(r"\bstar\s+(report|review|submission|listing|entry|profile)\b", re.IGNORECASE),
         re.compile(r"(registry|listing)\s+.{0,20}(review|update|entry|profile|submission)", re.IGNORECASE),
+        re.compile(r"\blogo\s+.{0,15}\bstar\b", re.IGNORECASE),
     ]),
+    # Certification — only exam/course/badge contexts, NOT generic "token" or "credential"
     ("Certification", [
-        re.compile(r"\b(ccsk|ccak|cczt|certificate of cloud|certification|exam\b|badge|credential|voucher|token)\b", re.IGNORECASE),
+        re.compile(r"\b(ccsk|ccak|cczt|certificate\s+of\s+cloud)\b", re.IGNORECASE),
+        re.compile(r"\b(certification|exam)\b(?!.*(?:stale|rotat|clean))", re.IGNORECASE),
+        re.compile(r"\b(badge|voucher)\b", re.IGNORECASE),
         re.compile(r"(training|course|learning|study)\s+(material|access|platform|portal)", re.IGNORECASE),
+        re.compile(r"\bbreadcrumb", re.IGNORECASE),
     ]),
-    # Billing before Tooling — renewal/invoice/payment takes priority over tool name
+    # Billing — renewal/invoice/payment takes priority over tool name
     ("Billing", [
-        re.compile(r"(invoice|receipt|refund|credit|charge|payment|billing|renewal|quote|pricing|cost)\b", re.IGNORECASE),
+        re.compile(r"(invoice|receipt|refund|credit|charge|payment|billing|renewal\s+quote|pricing|cost)\b", re.IGNORECASE),
         re.compile(r"(purchase|bought|paid|order)\s+.{0,30}(but|however|issue|problem|wrong|error)", re.IGNORECASE),
     ]),
-    # Tooling before Access Request — tool-specific mentions take priority
-    ("Tooling", [
-        re.compile(r"\b(github|gitlab|jira|confluence|slack|zoom|teams|zendesk|airtable|zapier|salesforce|pardot|hubspot|mailgun|surveymonkey)\b", re.IGNORECASE),
-        re.compile(r"\b(chatgpt|claude|copilot|ai\s+license|ai\s+vendor)\b", re.IGNORECASE),
-        re.compile(r"(consolidat|migrat|decommission|integrat)\w*\s+.{0,30}(tool|platform|service|account|license|subscription)", re.IGNORECASE),
-    ]),
+    # Access Request — BEFORE Tooling so "Mailgun access" = Access, not Tooling
     ("Access Request", [
         re.compile(r"(add|remove|grant|revoke|give|need)\s+.{0,30}(access|permission|role|admin|editor|viewer|member)", re.IGNORECASE),
-        re.compile(r"(access|permission|role)\s+(to|for|on|request)", re.IGNORECASE),
+        re.compile(r"\baccess\s+(to|for|on|request)\b", re.IGNORECASE),
         re.compile(r"(add|invite|remove)\s+.{0,20}(user|member|team|group)", re.IGNORECASE),
-        re.compile(r"(added? to|removed? from|join)\s+.{0,20}(team|group|channel|org|alias)", re.IGNORECASE),
+        re.compile(r"(added?\s+to|removed?\s+from|join)\s+.{0,20}(team|group|channel|org|alias)", re.IGNORECASE),
         re.compile(r"\b(add\w*|be\s+added)\b.{0,40}\balias\b", re.IGNORECASE),
-        re.compile(r"(sso|oauth|login|sign.?in|password|mfa|2fa)\b", re.IGNORECASE),
+        re.compile(r"\b(sso|oauth|login|sign.?in|password|mfa|2fa)\b", re.IGNORECASE),
+        re.compile(r"verify\s+.{0,30}\b(on|in|has)\s+.{0,15}(account|team|access)", re.IGNORECASE),
+        re.compile(r"\b(audit|review)\s+.{0,15}access\b", re.IGNORECASE),
     ]),
-    ("Infrastructure", [
-        re.compile(r"(server|dns|domain|ssl|tls|firewall|vpn|router|firmware|cloudflare|digital.?ocean|aws|azure|gcp)", re.IGNORECASE),
-        re.compile(r"(dmarc|dkim|spf|mx\s+record|email\s+(?:config|setting|routing|deliverability))", re.IGNORECASE),
-        re.compile(r"(deploy|hosting|uptime|outage|downtime|monitoring|backup)", re.IGNORECASE),
+    # Data/Reporting — "list of users", "run a report", data exports
+    ("Data/Reporting", [
+        re.compile(r"(dashboard|analytics|metric|data\s+(?:export|import|extract|query|migration))", re.IGNORECASE),
+        re.compile(r"(run\s+a?\s*report|generate\s+report|pull\s+report|report\s+of\b)", re.IGNORECASE),
+        re.compile(r"\blist\s+of\s+.{0,20}(user|member|account|email|active|staff)", re.IGNORECASE),
+        re.compile(r"(data\s+request|data\s+pull|prepkit\s+download)", re.IGNORECASE),
     ]),
-    ("Security", [
-        re.compile(r"(security|vulnerability|incident|breach|phishing|malware|ransomware|threat|audit)\b", re.IGNORECASE),
-        re.compile(r"(security\.txt|pen\s*test|penetration|compliance|pii|data\s+(?:leak|exposure|privacy|protection|flow|governance))", re.IGNORECASE),
-        re.compile(r"(stale\s+token|rotate\s+key|secret|credential\s+rotation)", re.IGNORECASE),
-    ]),
+    # Configuration — BEFORE Documentation so "SLA Policy" = Config, not Documentation
     ("Configuration", [
         re.compile(r"(config|setting|setup|enable|disable|toggle|update|modify|change)\s+.{0,30}(setting|config|option|feature|flag|policy|rule)", re.IGNORECASE),
-        re.compile(r"(redirect|rewrite|iframe|embed|seo|sitemap|robots\.txt|index)", re.IGNORECASE),
+        re.compile(r"\b(redirect|rewrite|iframe|embed|sitemap|robots\.txt)\b", re.IGNORECASE),
         re.compile(r"(workflow|automation|trigger|schedule|cron|sla\s+polic)", re.IGNORECASE),
         re.compile(r"(set\s*up|creat|build|configur)\w*\s+.{0,30}(form|page|template|landing|portal|widget)", re.IGNORECASE),
+        re.compile(r"(link\s+between|connect)\s+.{0,30}(base|table|system|platform)", re.IGNORECASE),
+        re.compile(r"\b(convert|migrat)\w*\s+.{0,20}account", re.IGNORECASE),
+        re.compile(r"\breview\s+.{0,15}(tenant|infra|m365|office\s*365)", re.IGNORECASE),
+        re.compile(r"\b(member\s+)?benefit\s+form\b", re.IGNORECASE),
     ]),
+    # Documentation — policy, publishing, CMS, working group pages, acknowledgements
     ("Documentation", [
-        re.compile(r"(document|documentation|wiki|guide|readme|runbook|playbook|knowledge\s+base|kb)\b", re.IGNORECASE),
-        re.compile(r"(publish|update|review|create)\s+.{0,20}(doc|page|article|paper|policy|procedure|process)", re.IGNORECASE),
-        re.compile(r"(cms|content\s+management|working\s+group\s+page)", re.IGNORECASE),
+        re.compile(r"\b(document|documentation|wiki|guide|readme|runbook|playbook|knowledge\s+base|kb)\b", re.IGNORECASE),
+        re.compile(r"(publish|publishing)\s+.{0,20}(doc|page|article|paper|policy|procedure|process|content)", re.IGNORECASE),
+        re.compile(r"\b(policy|procedure|guideline|standard)\s+(document|for|on|about|creation|review|update|ensure|consistency)", re.IGNORECASE),
+        re.compile(r"(create|update|review|ensure)\s+.{0,15}(policy|procedure|guideline)", re.IGNORECASE),
+        re.compile(r"\bcms\b(?!.*(?:malware|virus|threat))", re.IGNORECASE),
+        re.compile(r"(content\s+management|working\s+group\s+page|managing\s+.{0,15}page)", re.IGNORECASE),
+        re.compile(r"(acknowledge?ments?|privacy\s+policy|topic\s+filter)\b", re.IGNORECASE),
+        re.compile(r"(add\s+doc\s+to|sign.?up\s+email)", re.IGNORECASE),
+        re.compile(r"\b(guidance|guideline)\s+(for|on|about)", re.IGNORECASE),
+        re.compile(r"\buse\s+guidance\b", re.IGNORECASE),
+        re.compile(r"\bcontent\s+.{0,10}(group|link|fix)", re.IGNORECASE),
     ]),
+    # Security — tighten: require security-specific context, not just the word "security"
+    ("Security", [
+        re.compile(r"\b(vulnerability|incident|breach|phishing|malware|ransomware|threat)\b", re.IGNORECASE),
+        re.compile(r"\b(security\.txt|pen\s*test|penetration)\b", re.IGNORECASE),
+        re.compile(r"\b(pii|data\s+(?:leak|exposure|privacy|protection|flow|governance))\b", re.IGNORECASE),
+        re.compile(r"\b(stale\s+token|rotate\s+key|secret\s+rotation|credential\s+rotation)\b", re.IGNORECASE),
+        re.compile(r"\bsecurity\s+(audit|review|scan|assessment|incident|alert|patch)\b", re.IGNORECASE),
+        re.compile(r"\b(decommission\w*)\s+.{0,30}(pii|data|privacy|governance)", re.IGNORECASE),
+        re.compile(r"clean\w*\s+.{0,15}(stale|old|unused)\s+.{0,10}(token|key|secret|credential)", re.IGNORECASE),
+    ]),
+]
+
+# Pass 2: context-based patterns (title + description) — what is the subject area?
+_CONTEXT_PATTERNS = [
+    # Tooling BEFORE Infrastructure — so "tableau MCP server" hits Tooling, not Infra
+    ("Tooling", [
+        re.compile(r"\b(github|gitlab|jira|confluence|slack|zoom|teams|zendesk|airtable|zapier|salesforce|pardot|hubspot|mailgun|surveymonkey)\b", re.IGNORECASE),
+        re.compile(r"\b(chatgpt|claude|copilot|ai\s+license|ai\s+vendor|qms\s+chat\s*bot)\b", re.IGNORECASE),
+        re.compile(r"(consolidat|migrat|decommission|integrat)\w*\s+.{0,30}(tool|platform|service|account|license|subscription)", re.IGNORECASE),
+        re.compile(r"\b(mcp\s+server|tableau)\b", re.IGNORECASE),
+        re.compile(r"\bRIT\b"),
+    ]),
+    # Infrastructure — servers, DNS, cloud providers, backups, firmware
+    ("Infrastructure", [
+        re.compile(r"\b(server|dns|domain|ssl|tls|firewall|vpn|router|firmware)\b", re.IGNORECASE),
+        re.compile(r"\b(cloudflare|digital.?ocean|aws|azure|gcp)\b", re.IGNORECASE),
+        re.compile(r"(dmarc|dkim|spf|mx\s+record|email\s+(?:config|setting|routing|deliverability))", re.IGNORECASE),
+        re.compile(r"(deploy|hosting|uptime|outage|downtime|monitoring|backup)\b", re.IGNORECASE),
+        re.compile(r"(indexed|crawl|seo)\s+.{0,20}(site|page|url)", re.IGNORECASE),
+        re.compile(r"\b(local\s+file|old\s+(?:machine|computer|laptop)|microsoft\s+machine)\b", re.IGNORECASE),
+        re.compile(r"\b(malware|severity\s+alert)\b", re.IGNORECASE),
+    ]),
+    # Billing (fallback if not caught by title)
+    ("Billing", [
+        re.compile(r"(invoice|receipt|refund|credit|charge|payment|billing|renewal|quote|pricing|cost)\b", re.IGNORECASE),
+    ]),
+    # Certification (fallback)
+    ("Certification", [
+        re.compile(r"\b(ccsk|ccak|cczt|certification|exam|badge|voucher)\b", re.IGNORECASE),
+        re.compile(r"\b(breadcrumb|circle)\b.*\b(project|decommission)", re.IGNORECASE),
+    ]),
+    # Account Issue
     ("Account Issue", [
         re.compile(r"(account|profile|user)\s+.{0,20}(expired?|locked|blocked|suspended|disabled|inactive|missing|wrong|invalid)", re.IGNORECASE),
         re.compile(r"(expired?|expir(?:ing|ation))\s+.{0,20}(account|license|subscription|membership|certificate)", re.IGNORECASE),
         re.compile(r"(cannot|can'?t|unable)\s+.{0,20}(log\s*in|sign\s*in|access|authenticate)", re.IGNORECASE),
     ]),
+    # Data/Reporting (fallback)
     ("Data/Reporting", [
-        re.compile(r"(dashboard|analytics|metric|data\s+(?:export|import|extract|query|migration))", re.IGNORECASE),
-        re.compile(r"(run\s+a\s+report|generate\s+report|pull\s+report)", re.IGNORECASE),
         re.compile(r"(csv|excel|spreadsheet|tableau|google\s+sheet)", re.IGNORECASE),
     ]),
 ]
 
 
 def detect_category(title: str, description: str) -> str:
-    """Detect the operational category of a ticket based on title and description."""
+    """Detect the operational category of a ticket.
+
+    Uses a two-pass approach:
+      Pass 1 — action patterns matched against the TITLE only.
+               Detects the *intent* (access request, policy work, reporting).
+      Pass 2 — context patterns matched against title + description.
+               Detects the *subject area* (tool, infra component, program).
+    """
+    # Pass 1: check title for action-based intent
+    for category, patterns in _ACTION_PATTERNS:
+        for pat in patterns:
+            if pat.search(title):
+                return category
+
+    # Pass 2: check title + description for context/subject
     text = f"{title} {(description or '')[:1500]}"
-    for category, patterns in CATEGORY_PATTERNS:
+    for category, patterns in _CONTEXT_PATTERNS:
         for pat in patterns:
             if pat.search(text):
                 return category
+
     return "General Inquiry"
 
 
