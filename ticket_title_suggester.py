@@ -488,7 +488,6 @@ _ACTION_PATTERNS = [
         re.compile(r"\b(certification|exam)\b(?!.*(?:stale|rotat|clean))", re.IGNORECASE),
         re.compile(r"\b(badge|voucher)\b", re.IGNORECASE),
         re.compile(r"(training|course|learning|study)\s+(material|access|platform|portal)", re.IGNORECASE),
-        re.compile(r"\bbreadcrumb", re.IGNORECASE),
     ]),
     # Billing — renewal/invoice/payment takes priority over tool name
     ("Billing", [
@@ -505,6 +504,7 @@ _ACTION_PATTERNS = [
         re.compile(r"\b(sso|oauth|login|sign.?in|password|mfa|2fa)\b", re.IGNORECASE),
         re.compile(r"verify\s+.{0,30}\b(on|in|has)\s+.{0,15}(account|team|access)", re.IGNORECASE),
         re.compile(r"\b(audit|review)\s+.{0,15}access\b", re.IGNORECASE),
+        re.compile(r"\b(change|transfer)\s+.{0,40}(owner|ownership)\b", re.IGNORECASE),
     ]),
     # Data/Reporting — "list of users", "run a report", data exports
     ("Data/Reporting", [
@@ -512,6 +512,10 @@ _ACTION_PATTERNS = [
         re.compile(r"(run\s+a?\s*report|generate\s+report|pull\s+report|report\s+of\b)", re.IGNORECASE),
         re.compile(r"\blist\s+of\s+.{0,20}(user|member|account|email|active|staff)", re.IGNORECASE),
         re.compile(r"(data\s+request|data\s+pull|prepkit\s+download)", re.IGNORECASE),
+    ]),
+    # Infrastructure (action) — subdomain/domain removal, decommission of hosted resources
+    ("Infrastructure", [
+        re.compile(r"\b(removal|decommission|retire|shut\s*down)\s+.{0,10}(of\s+)?\w+\.\w+\.\w+", re.IGNORECASE),
     ]),
     # Configuration — BEFORE Documentation so "SLA Policy" = Config, not Documentation
     ("Configuration", [
@@ -523,6 +527,8 @@ _ACTION_PATTERNS = [
         re.compile(r"\b(convert|migrat)\w*\s+.{0,20}account", re.IGNORECASE),
         re.compile(r"\breview\s+.{0,15}(tenant|infra|m365|office\s*365)", re.IGNORECASE),
         re.compile(r"\b(member\s+)?benefit\s+form\b", re.IGNORECASE),
+        re.compile(r"\bcontent\s+group\s+.{0,15}(link|fix|url|update|broken)", re.IGNORECASE),
+        re.compile(r"\badd\s+.{0,15}\bto\s+.{0,15}(email|notification|template|sign.?up)", re.IGNORECASE),
     ]),
     # Documentation — policy, publishing, CMS, working group pages, acknowledgements
     ("Documentation", [
@@ -533,10 +539,8 @@ _ACTION_PATTERNS = [
         re.compile(r"\bcms\b(?!.*(?:malware|virus|threat))", re.IGNORECASE),
         re.compile(r"(content\s+management|working\s+group\s+page|managing\s+.{0,15}page)", re.IGNORECASE),
         re.compile(r"(acknowledge?ments?|privacy\s+policy|topic\s+filter)\b", re.IGNORECASE),
-        re.compile(r"(add\s+doc\s+to|sign.?up\s+email)", re.IGNORECASE),
         re.compile(r"\b(guidance|guideline)\s+(for|on|about)", re.IGNORECASE),
         re.compile(r"\buse\s+guidance\b", re.IGNORECASE),
-        re.compile(r"\bcontent\s+.{0,10}(group|link|fix)", re.IGNORECASE),
     ]),
     # Security — tighten: require security-specific context, not just the word "security"
     ("Security", [
@@ -574,10 +578,15 @@ _CONTEXT_PATTERNS = [
     ("Billing", [
         re.compile(r"(invoice|receipt|refund|credit|charge|payment|billing|renewal|quote|pricing|cost)\b", re.IGNORECASE),
     ]),
-    # Certification (fallback)
+    # Documentation (fallback from description)
+    ("Documentation", [
+        re.compile(r"(work\s+instruction|knowledge\s+capture|documentation\s+tool|document\s+control)", re.IGNORECASE),
+        re.compile(r"(formalize|capture|store)\s+.{0,30}(knowledge|instruction|procedure|process)", re.IGNORECASE),
+    ]),
+    # Certification (fallback) — only CSA-specific cert terms, not generic "certification"
     ("Certification", [
-        re.compile(r"\b(ccsk|ccak|cczt|certification|exam|badge|voucher)\b", re.IGNORECASE),
-        re.compile(r"\b(breadcrumb|circle)\b.*\b(project|decommission)", re.IGNORECASE),
+        re.compile(r"\b(ccsk|ccak|cczt)\b", re.IGNORECASE),
+        re.compile(r"\b(exam|badge|voucher)\s+.{0,20}(code|issue|problem|access|not\s+work|missing|expired?)", re.IGNORECASE),
     ]),
     # Account Issue
     ("Account Issue", [
@@ -1160,6 +1169,166 @@ def _build_best_effort_title(category: str, title: str, description: str, commen
     return suggested
 
 
+# ---------------------------------------------------------------------------
+# Title enhancement — clean, fix, and enrich descriptive titles
+# ---------------------------------------------------------------------------
+
+# Common IT/ops typos: misspelling → correction
+_TYPO_FIXES = [
+    (re.compile(r"\bassesments?\b", re.IGNORECASE), lambda m: "assessments" if m.group().endswith("s") else "assessment"),
+    (re.compile(r"\breplacment\b", re.IGNORECASE), "replacement"),
+    (re.compile(r"\brecieve\b", re.IGNORECASE), "receive"),
+    (re.compile(r"\brecieved\b", re.IGNORECASE), "received"),
+    (re.compile(r"\boccured\b", re.IGNORECASE), "occurred"),
+    (re.compile(r"\boccurr?ance\b", re.IGNORECASE), "occurrence"),
+    (re.compile(r"\bseperates?\b", re.IGNORECASE), lambda m: "separates" if m.group().endswith("s") else "separate"),
+    (re.compile(r"\bneccessary\b", re.IGNORECASE), "necessary"),
+    (re.compile(r"\bneccessity\b", re.IGNORECASE), "necessity"),
+    (re.compile(r"\bdependan(cy|cies)\b", re.IGNORECASE), lambda m: "dependency" if m.group(1) == "cy" else "dependencies"),
+    (re.compile(r"\bprivelege\b", re.IGNORECASE), "privilege"),
+    (re.compile(r"\bpriviledge\b", re.IGNORECASE), "privilege"),
+    (re.compile(r"\benviroment\b", re.IGNORECASE), "environment"),
+    (re.compile(r"\bmanagment\b", re.IGNORECASE), "management"),
+    (re.compile(r"\bmaintainance\b", re.IGNORECASE), "maintenance"),
+    (re.compile(r"\bmaintenence\b", re.IGNORECASE), "maintenance"),
+    (re.compile(r"\binfrastucture\b", re.IGNORECASE), "infrastructure"),
+    (re.compile(r"\bauthentification\b", re.IGNORECASE), "authentication"),
+    (re.compile(r"\bsubcription\b", re.IGNORECASE), "subscription"),
+    (re.compile(r"\bconfigration\b", re.IGNORECASE), "configuration"),
+    (re.compile(r"\bdecommision\b", re.IGNORECASE), "decommission"),
+    (re.compile(r"\bdecomission\b", re.IGNORECASE), "decommission"),
+    (re.compile(r"\bWIndows\b"), "Windows"),
+]
+
+# Noise patterns to strip from titles
+_TITLE_NOISE = [
+    # [AAS.Tasks.ScheduledTask], [AAS.IO.InternalOperationsRequest] etc.
+    re.compile(r"\s*[-–—]\s*\[AAS\.[^\]]+\]", re.IGNORECASE),
+    re.compile(r"\s*\[AAS\.[^\]]+\]", re.IGNORECASE),
+    # Calendar/notification noise: "@ Fri Aug 29, 2025 12:00 (MDT) (CSA IT)"
+    re.compile(r"\s*@\s*\w{3}\s+\w{3}\s+\d{1,2},?\s*\d{4}\s+\d{1,2}:\d{2}\s*(?:\([^)]+\)\s*)*", re.IGNORECASE),
+    # "Notification:" prefix
+    re.compile(r"^Notification:\s*", re.IGNORECASE),
+    # Trailing URLs
+    re.compile(r"\s+https?://\S+\s*$"),
+    # Trailing question marks on requests (not actual questions)
+    re.compile(r"\?+\s*$"),
+    # Trailing periods and spaces
+    re.compile(r"[.\s]+$"),
+    # " - Cloud Security Alliance" suffix
+    re.compile(r"\s*[-–—]\s*Cloud Security Alliance\s*$", re.IGNORECASE),
+]
+
+# Conversational/informal patterns to clean up
+_INFORMAL_PATTERNS = [
+    # "Can you help with X?" → "X"
+    (re.compile(r"^(?:can\s+you\s+(?:help|assist)\s+(?:with|me\s+with)\s*)", re.IGNORECASE), ""),
+    # "Please ensure X" → "Ensure X"
+    (re.compile(r"^please\s+", re.IGNORECASE), ""),
+    # "Regarding the X" → "X"
+    (re.compile(r"^regarding\s+(?:the\s+)?", re.IGNORECASE), ""),
+    # "Proposal: X — 15 min to walk through?" → "Proposal: X"
+    (re.compile(r"\s*[-–—]\s*\d+\s*min(?:ute)?s?\s+to\s+(?:walk\s+through|discuss|chat|review)\s*\??$", re.IGNORECASE), ""),
+    # "Important X update:" → "X Update:"
+    (re.compile(r"^important\s+", re.IGNORECASE), ""),
+]
+
+
+def enhance_title(title: str, description: str, comments: list[dict]) -> str:
+    """Enhance a descriptive title using content from description and comments.
+
+    Cleans noise, fixes typos, truncates overly long titles, and supplements
+    short titles with context extracted from the ticket body.
+    Returns the enhanced title WITHOUT the [Category] prefix.
+    """
+    enhanced = title.strip()
+
+    # --- Phase 1: Strip noise ---
+    for noise_pat in _TITLE_NOISE:
+        enhanced = noise_pat.sub("", enhanced).strip()
+
+    # --- Phase 2: Fix typos ---
+    for typo_pat, fix in _TYPO_FIXES:
+        enhanced = typo_pat.sub(fix, enhanced)
+
+    # --- Phase 3: Clean up informal/conversational phrasing ---
+    for informal_pat, repl in _INFORMAL_PATTERNS:
+        enhanced = informal_pat.sub(repl, enhanced).strip()
+
+    # --- Phase 4: Handle overly long titles (>75 chars) ---
+    # Try to extract a tighter summary from description
+    if len(enhanced) > 75:
+        desc = strip_html((description or "")[:2000])
+        desc_clean = re.sub(r"https?://\S+", " ", desc)
+        desc_clean = re.sub(r"\s+", " ", desc_clean).strip()
+
+        # Look for a clear action/request sentence in the description
+        # that might be more concise than the title
+        _request_patterns = [
+            re.compile(r"(?:we\s+need\s+to|need\s+to|please|request(?:ing)?)\s+(.{15,70}?)(?:\.|$)", re.IGNORECASE),
+            re.compile(r"(?:goal|objective|purpose)(?:\s+is)?(?:\s*:\s*|\s+to\s+)(.{15,70}?)(?:\.|$)", re.IGNORECASE),
+        ]
+        for rp in _request_patterns:
+            m = rp.search(desc_clean[:500])
+            if m:
+                candidate = m.group(1).strip().rstrip(" ,;:-–—")
+                # Only use if meaningfully shorter and still informative
+                if len(candidate) < len(enhanced) - 15 and len(candidate.split()) >= 4:
+                    enhanced = candidate
+                    break
+
+        # If still too long, truncate at a natural break point
+        if len(enhanced) > 80:
+            # Try to cut at a natural boundary (dash, comma, period)
+            for sep in [" — ", " – ", " - ", ", ", ": "]:
+                idx = enhanced.find(sep, 30)
+                if 30 < idx < 75:
+                    enhanced = enhanced[:idx]
+                    break
+            else:
+                # Hard truncate at word boundary
+                if len(enhanced) > 80:
+                    enhanced = enhanced[:77].rsplit(" ", 1)[0] + "..."
+
+    # --- Phase 5: Supplement short titles with description context ---
+    # If the title is descriptive but very short (<25 chars), add context
+    word_count = len(enhanced.split())
+    if word_count <= 4 and len(enhanced) < 30 and description:
+        desc = strip_html((description or "")[:1500])
+        desc = re.sub(r"https?://\S+", " ", desc)
+        desc = re.sub(r"\s+", " ", desc).strip().lower()
+
+        # Extract a short context phrase from the description
+        _context_patterns = [
+            # "I would like to X" / "We need to X"
+            re.compile(r"(?:i\s+would\s+like\s+to|we\s+need\s+to|i\s+want\s+to|need\s+to|plan\s+to)\s+(.{10,50}?)(?:\.|,|\n|$)", re.IGNORECASE),
+            # "for X" / "to X" purpose phrases
+            re.compile(r"(?:this\s+is\s+(?:for|about|to))\s+(.{10,40}?)(?:\.|,|\n|$)", re.IGNORECASE),
+            # "set up X for Y"
+            re.compile(r"(?:set\s*up|configure|create|build)\s+(.{10,40}?)(?:\.|,|\n|$)", re.IGNORECASE),
+        ]
+        for cp in _context_patterns:
+            m = cp.search(desc[:500])
+            if m:
+                context = m.group(1).strip().rstrip(" ,;:-–—")
+                context_words = [w for w in context.split() if w.lower() not in STOP_WORDS and len(w) > 2]
+                if len(context_words) >= 2:
+                    # Append as a dash-separated clarification
+                    supplement = context[0].upper() + context[1:]
+                    if len(supplement) > 40:
+                        supplement = supplement[:37].rsplit(" ", 1)[0] + "..."
+                    enhanced = f"{enhanced} — {supplement}"
+                    break
+
+    # Final cleanup
+    enhanced = enhanced.strip()
+    enhanced = re.sub(r"\s{2,}", " ", enhanced)
+    if enhanced and enhanced[0].islower():
+        enhanced = enhanced[0].upper() + enhanced[1:]
+
+    return enhanced
+
+
 def suggest_title(ticket: dict, comments: list[dict]) -> dict:
     """Analyze a ticket title and suggest improvements (with grammar normalization)."""
     result = _suggest_title_raw(ticket, comments)
@@ -1237,16 +1406,23 @@ def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
         }
 
     if not is_vague_title(cleaned_title):
-        # Title is descriptive — but suggest a category prefix if it doesn't have one
+        # Title is descriptive — enhance it and add category prefix
         if not re.match(r"^\[.+?\]", cleaned_title):
-            category = detect_category(cleaned_title, description)
-            prefixed = f"[{category}] {cleaned_title}"
+            enhanced = enhance_title(cleaned_title, description, comments)
+            category = detect_category(enhanced, description)
+            prefixed = f"[{category}] {enhanced}"
             if len(prefixed) > 100:
                 prefixed = prefixed[:97] + "..."
+            # Determine reason based on how much the title changed
+            was_changed = enhanced.lower().strip() != cleaned_title.lower().strip()
+            if was_changed:
+                reason = f"Enhanced title with [{category}] prefix — cleaned and improved from original"
+            else:
+                reason = f"Adding [{category}] prefix for triage — original title is descriptive"
             return {
                 "suggested_title": prefixed,
                 "status": "Suggestion",
-                "reason": f"Adding [{category}] prefix for triage — original title is descriptive",
+                "reason": reason,
             }
         return {
             "suggested_title": "",
@@ -1378,10 +1554,103 @@ SPAM_BADGE    = "9E9E9E"
 
 HEADERS = [
     "Ticket #", "Status", "Current Title", "Suggested Title",
-    "Recommendation", "Reason", "Ticket Status", "Requester",
-    "Created", "Last Updated",
+    "Recommendation", "Reason", "Related Tickets",
+    "Ticket Status", "Requester", "Created", "Last Updated",
 ]
-WIDTHS = [10, 14, 44, 44, 18, 36, 12, 20, 13, 13]
+WIDTHS = [10, 14, 44, 44, 18, 36, 18, 12, 20, 13, 13]
+
+
+# ---------------------------------------------------------------------------
+# Duplicate / related ticket detection
+# ---------------------------------------------------------------------------
+
+def _tokenize_for_similarity(text: str) -> set[str]:
+    """Extract meaningful lowercase tokens from text for similarity comparison."""
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"\[.+?\]", " ", text)  # strip [Category] prefixes
+    text = re.sub(r"[^\w\s]", " ", text)
+    words = text.lower().split()
+    return {w for w in words if w not in STOP_WORDS and len(w) > 2
+            and "redacted" not in w}
+
+
+def _jaccard_similarity(set_a: set, set_b: set) -> float:
+    """Compute Jaccard similarity between two token sets."""
+    if not set_a or not set_b:
+        return 0.0
+    intersection = set_a & set_b
+    union = set_a | set_b
+    return len(intersection) / len(union)
+
+
+def detect_related_tickets(tickets_data: list[dict], threshold: float = 0.35) -> dict[int, list[tuple[int, float]]]:
+    """Find related/duplicate tickets based on title + description keyword overlap.
+
+    Args:
+        tickets_data: list of dicts with keys: ticket_id, title, description, category
+        threshold: minimum Jaccard similarity to consider tickets related (0.0–1.0)
+
+    Returns:
+        dict mapping ticket_id → list of (related_ticket_id, similarity_score)
+        sorted by similarity descending.
+    """
+    # Pre-compute token sets for each ticket
+    ticket_tokens = {}
+    for t in tickets_data:
+        tid = t["ticket_id"]
+        # Combine title (weighted by repeating) + first 500 chars of description
+        title_text = t.get("title", "")
+        desc_text = (t.get("description", "") or "")[:500]
+        # Title tokens are more important — include them twice
+        combined = f"{title_text} {title_text} {desc_text}"
+        ticket_tokens[tid] = {
+            "tokens": _tokenize_for_similarity(combined),
+            "category": t.get("category", ""),
+            "title": title_text,
+        }
+
+    # Pairwise comparison
+    tids = list(ticket_tokens.keys())
+    related: dict[int, list[tuple[int, float]]] = {tid: [] for tid in tids}
+
+    for i in range(len(tids)):
+        for j in range(i + 1, len(tids)):
+            tid_a, tid_b = tids[i], tids[j]
+            data_a, data_b = ticket_tokens[tid_a], ticket_tokens[tid_b]
+
+            sim = _jaccard_similarity(data_a["tokens"], data_b["tokens"])
+
+            # Boost similarity if they share the same category
+            if data_a["category"] and data_a["category"] == data_b["category"]:
+                sim *= 1.15  # 15% boost for same category
+
+            # Boost if titles share 2+ meaningful words
+            title_tokens_a = _tokenize_for_similarity(data_a["title"])
+            title_tokens_b = _tokenize_for_similarity(data_b["title"])
+            title_overlap = title_tokens_a & title_tokens_b
+            if len(title_overlap) >= 2:
+                sim *= 1.25  # 25% boost for title keyword overlap
+
+            if sim >= threshold:
+                related[tid_a].append((tid_b, round(sim, 2)))
+                related[tid_b].append((tid_a, round(sim, 2)))
+
+    # Sort each ticket's related list by similarity descending
+    for tid in related:
+        related[tid].sort(key=lambda x: x[1], reverse=True)
+
+    return related
+
+
+def format_related_tickets(related: list[tuple[int, float]]) -> str:
+    """Format related ticket list for display in spreadsheet cell."""
+    if not related:
+        return ""
+    parts = []
+    for tid, score in related[:3]:  # max 3 related tickets per cell
+        pct = int(score * 100)
+        parts.append(f"#{tid} ({pct}%)")
+    return ", ".join(parts)
 
 
 def _border():
@@ -1504,17 +1773,24 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
         # Col 6: Reason
         _cell(ws, cur_row, 6, r.get("Reason", ""), bg=bg, wrap=True, size=10)
 
-        # Col 7: Ticket Status
-        _cell(ws, cur_row, 7, r.get("Ticket Status", ""), bg=bg, align="center")
+        # Col 7: Related Tickets
+        related = r.get("Related Tickets", "")
+        if related:
+            _cell(ws, cur_row, 7, related, fc=LINK_COLOR, bg=bg, wrap=True, size=10)
+        else:
+            _cell(ws, cur_row, 7, "", bg=bg)
 
-        # Col 8: Requester
-        _cell(ws, cur_row, 8, r.get("Requester", ""), bg=bg, align="center")
+        # Col 8: Ticket Status
+        _cell(ws, cur_row, 8, r.get("Ticket Status", ""), bg=bg, align="center")
 
-        # Col 9: Created
-        _cell(ws, cur_row, 9, r.get("Created", ""), bg=bg, align="center")
+        # Col 9: Requester
+        _cell(ws, cur_row, 9, r.get("Requester", ""), bg=bg, align="center")
 
-        # Col 10: Last Updated
-        _cell(ws, cur_row, 10, r.get("Last Updated", ""), bg=bg, align="center")
+        # Col 10: Created
+        _cell(ws, cur_row, 10, r.get("Created", ""), bg=bg, align="center")
+
+        # Col 11: Last Updated
+        _cell(ws, cur_row, 11, r.get("Last Updated", ""), bg=bg, align="center")
 
         ws.row_dimensions[cur_row].height = 48
         cur_row += 1
@@ -1576,6 +1852,7 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
         ("PII in Title", pii_count),
         ("Needs Manual Review", run_meta.get("manual_reviews", 0)),
         ("Spam/Marketing", run_meta.get("spam_flagged", 0)),
+        ("Related/Duplicate Pairs", run_meta.get("related_tickets", 0)),
     ]
     for label, val in breakdown_items:
         es.cell(row=row_num, column=1, value=label).font = Font(
@@ -1719,6 +1996,7 @@ def main():
     logger.info("Found %d open tickets to analyze.", len(tickets))
 
     report_rows: list[dict] = []
+    tickets_for_similarity: list[dict] = []  # for duplicate detection
     suggestion_count = 0
     keep_count = 0
     manual_review_count = 0
@@ -1787,6 +2065,9 @@ def main():
             recommendation = "No Action Needed"
             logger.info("  → Title is fine, no change suggested.")
 
+        description = ticket.get("description", "")
+        category = detect_category(clean_subject_line(current_title), description)
+
         report_rows.append({
             "Ticket #": ticket_id,
             "Status": status,
@@ -1794,12 +2075,32 @@ def main():
             "Suggested Title": suggested_title,
             "Recommendation": recommendation,
             "Reason": reason,
+            "Related Tickets": "",  # populated after duplicate detection
             "Ticket URL": ticket_url,
             "Ticket Status": ticket_status.capitalize(),
             "Requester": requester_name,
             "Created": format_date(created_at),
             "Last Updated": format_date(updated_at),
         })
+
+        tickets_for_similarity.append({
+            "ticket_id": ticket_id,
+            "title": clean_subject_line(current_title),
+            "description": description,
+            "category": category,
+        })
+
+    # ── Duplicate / related ticket detection ──────────────────────────────
+    logger.info("Running duplicate/related ticket detection...")
+    related_map = detect_related_tickets(tickets_for_similarity)
+    related_groups_count = 0
+    for row in report_rows:
+        tid = row["Ticket #"]
+        related_list = related_map.get(tid, [])
+        if related_list:
+            row["Related Tickets"] = format_related_tickets(related_list)
+            related_groups_count += 1
+    logger.info("Found %d tickets with related/duplicate matches.", related_groups_count)
 
     # Print summary
     print("\n" + "=" * 80)
@@ -1831,6 +2132,7 @@ def main():
         "titles_kept": keep_count,
         "manual_reviews": manual_review_count,
         "spam_flagged": spam_count,
+        "related_tickets": related_groups_count,
         "errors": errors,
     }
 
