@@ -70,7 +70,7 @@ MAX_TITLE_LENGTH = 150
 PST = timezone(timedelta(hours=-8))
 _now = datetime.now(PST)
 NOW = _now.strftime("%Y-%m-%d_%I%M") + ("am" if _now.hour < 12 else "pm")
-REPORT_PATH = os.environ.get("OUTPUT_FILE", f"/tmp/Title_Suggestions_{NOW}.xlsx")
+REPORT_PATH = os.environ.get("OUTPUT_FILE", f"/tmp/IT_Ops_Title_Suggestions_{NOW}.xlsx")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -455,6 +455,84 @@ def is_automation_ticket(title: str, description: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Category detection for suggested titles
+# ---------------------------------------------------------------------------
+
+CATEGORY_PATTERNS = [
+    # Order matters — first match wins, so put more specific patterns first
+    # Product/program-specific categories go first to avoid generic matches
+    ("STAR/Registry", [
+        re.compile(r"\b(star\s+registry|star\s+level|star\s+attestation|starwatch|caiq|ccm|grc\s+stack|trusted\s+cloud)\b", re.IGNORECASE),
+        re.compile(r"\bstar\s+(report|review|submission|listing|entry|profile)\b", re.IGNORECASE),
+        re.compile(r"(registry|listing)\s+.{0,20}(review|update|entry|profile|submission)", re.IGNORECASE),
+    ]),
+    ("Certification", [
+        re.compile(r"\b(ccsk|ccak|cczt|certificate of cloud|certification|exam\b|badge|credential|voucher|token)\b", re.IGNORECASE),
+        re.compile(r"(training|course|learning|study)\s+(material|access|platform|portal)", re.IGNORECASE),
+    ]),
+    # Billing before Tooling — renewal/invoice/payment takes priority over tool name
+    ("Billing", [
+        re.compile(r"(invoice|receipt|refund|credit|charge|payment|billing|renewal|quote|pricing|cost)\b", re.IGNORECASE),
+        re.compile(r"(purchase|bought|paid|order)\s+.{0,30}(but|however|issue|problem|wrong|error)", re.IGNORECASE),
+    ]),
+    # Tooling before Access Request — tool-specific mentions take priority
+    ("Tooling", [
+        re.compile(r"\b(github|gitlab|jira|confluence|slack|zoom|teams|zendesk|airtable|zapier|salesforce|pardot|hubspot|mailgun|surveymonkey)\b", re.IGNORECASE),
+        re.compile(r"\b(chatgpt|claude|copilot|ai\s+license|ai\s+vendor)\b", re.IGNORECASE),
+        re.compile(r"(consolidat|migrat|decommission|integrat)\w*\s+.{0,30}(tool|platform|service|account|license|subscription)", re.IGNORECASE),
+    ]),
+    ("Access Request", [
+        re.compile(r"(add|remove|grant|revoke|give|need)\s+.{0,30}(access|permission|role|admin|editor|viewer|member)", re.IGNORECASE),
+        re.compile(r"(access|permission|role)\s+(to|for|on|request)", re.IGNORECASE),
+        re.compile(r"(add|invite|remove)\s+.{0,20}(user|member|team|group)", re.IGNORECASE),
+        re.compile(r"(added? to|removed? from|join)\s+.{0,20}(team|group|channel|org|alias)", re.IGNORECASE),
+        re.compile(r"\b(add\w*|be\s+added)\b.{0,40}\balias\b", re.IGNORECASE),
+        re.compile(r"(sso|oauth|login|sign.?in|password|mfa|2fa)\b", re.IGNORECASE),
+    ]),
+    ("Infrastructure", [
+        re.compile(r"(server|dns|domain|ssl|tls|firewall|vpn|router|firmware|cloudflare|digital.?ocean|aws|azure|gcp)", re.IGNORECASE),
+        re.compile(r"(dmarc|dkim|spf|mx\s+record|email\s+(?:config|setting|routing|deliverability))", re.IGNORECASE),
+        re.compile(r"(deploy|hosting|uptime|outage|downtime|monitoring|backup)", re.IGNORECASE),
+    ]),
+    ("Security", [
+        re.compile(r"(security|vulnerability|incident|breach|phishing|malware|ransomware|threat|audit)\b", re.IGNORECASE),
+        re.compile(r"(security\.txt|pen\s*test|penetration|compliance|pii|data\s+(?:leak|exposure|privacy|protection|flow|governance))", re.IGNORECASE),
+        re.compile(r"(stale\s+token|rotate\s+key|secret|credential\s+rotation)", re.IGNORECASE),
+    ]),
+    ("Configuration", [
+        re.compile(r"(config|setting|setup|enable|disable|toggle|update|modify|change)\s+.{0,30}(setting|config|option|feature|flag|policy|rule)", re.IGNORECASE),
+        re.compile(r"(redirect|rewrite|iframe|embed|seo|sitemap|robots\.txt|index)", re.IGNORECASE),
+        re.compile(r"(workflow|automation|trigger|schedule|cron|sla\s+polic)", re.IGNORECASE),
+    ]),
+    ("Documentation", [
+        re.compile(r"(document|documentation|wiki|guide|readme|runbook|playbook|knowledge\s+base|kb)\b", re.IGNORECASE),
+        re.compile(r"(publish|update|review|create)\s+.{0,20}(doc|page|article|paper|policy|procedure|process)", re.IGNORECASE),
+        re.compile(r"(cms|content\s+management|working\s+group\s+page)", re.IGNORECASE),
+    ]),
+    ("Account Issue", [
+        re.compile(r"(account|profile|user)\s+.{0,20}(expired?|locked|blocked|suspended|disabled|inactive|missing|wrong|invalid)", re.IGNORECASE),
+        re.compile(r"(expired?|expir(?:ing|ation))\s+.{0,20}(account|license|subscription|membership|certificate)", re.IGNORECASE),
+        re.compile(r"(cannot|can'?t|unable)\s+.{0,20}(log\s*in|sign\s*in|access|authenticate)", re.IGNORECASE),
+    ]),
+    ("Data/Reporting", [
+        re.compile(r"(dashboard|analytics|metric|data\s+(?:export|import|extract|query|migration))", re.IGNORECASE),
+        re.compile(r"(run\s+a\s+report|generate\s+report|pull\s+report)", re.IGNORECASE),
+        re.compile(r"(csv|excel|spreadsheet|tableau|google\s+sheet)", re.IGNORECASE),
+    ]),
+]
+
+
+def detect_category(title: str, description: str) -> str:
+    """Detect the operational category of a ticket based on title and description."""
+    text = f"{title} {(description or '')[:1500]}"
+    for category, patterns in CATEGORY_PATTERNS:
+        for pat in patterns:
+            if pat.search(text):
+                return category
+    return "General Inquiry"
+
+
 def is_url_title(title: str) -> bool:
     """Check if a title is primarily a URL or URL fragment."""
     cleaned = title.strip()
@@ -690,6 +768,10 @@ def build_suggested_title(title: str, description: str, comments: list[dict]) ->
         if email_count >= 3 and title_word_count <= 3:
             return ""
 
+    # Prefix with category
+    category = detect_category(title, description)
+    suggested = f"[{category}] {suggested}"
+
     # Enforce max length
     if len(suggested) > 100:
         suggested = suggested[:97] + "..."
@@ -739,7 +821,8 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
                 product_name = re.sub(r"\s*[-–—]\s*Cloud Security Alliance\s*$", "", product_name).rstrip(".")
                 if len(product_name) > 80:
                     product_name = product_name[:77] + "..."
-                suggested = f"{product_name} — {notif_type}"
+                category = detect_category(current_title, description)
+                suggested = f"[{category}] {product_name} — {notif_type}"
                 return {
                     "suggested_title": suggested,
                     "status": "Suggestion",

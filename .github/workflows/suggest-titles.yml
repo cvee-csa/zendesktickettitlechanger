@@ -49,5 +49,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: title-suggestions-report-${{ github.run_id }}
-          path: /tmp/Title_Suggestions_*.xlsx
+          path: /tmp/IT_Ops_Title_Suggestions_*.xlsx
           retention-days: 30
