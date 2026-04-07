@@ -631,6 +631,193 @@ def extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
     return found_products + top_words
 
 
+# ---------------------------------------------------------------------------
+# Title grammar & capitalization normalization
+# ---------------------------------------------------------------------------
+
+# Words that should stay lowercase in title case (unless first word)
+_TITLE_CASE_LOWERCASE = {
+    "a", "an", "the", "and", "but", "or", "nor", "for", "yet", "so",
+    "in", "on", "at", "to", "by", "of", "as", "if",
+    "vs", "via", "per", "from", "into", "with", "over", "than",
+}
+
+# Words/acronyms that should always be uppercase
+_ALWAYS_UPPER = {
+    "api", "dns", "ssl", "tls", "vpn", "sso", "mfa", "2fa", "pii",
+    "sla", "cms", "csv", "url", "ip", "it", "ai", "qa", "ui", "ux",
+    "aws", "gcp", "ccsk", "ccak", "cczt", "ccm", "caiq", "gdpr",
+    "seo", "dmarc", "dkim", "spf", "mx", "csa", "pdf", "html",
+    "saml", "oauth", "ldap", "smtp", "imap", "http", "https",
+    "sftp", "ftp", "ssh", "sql", "json", "xml", "yaml", "rsa",
+    "soc", "iso", "nist", "cis", "iam", "rbac", "cidr", "cdn",
+    "grc", "404",
+}
+
+# Brand names that have specific capitalization
+_BRAND_CASING = {
+    "zendesk": "Zendesk", "github": "GitHub", "gitlab": "GitLab",
+    "airtable": "Airtable", "zapier": "Zapier", "slack": "Slack",
+    "salesforce": "Salesforce", "pardot": "Pardot", "hubspot": "HubSpot",
+    "jira": "Jira", "confluence": "Confluence", "zoom": "Zoom",
+    "chatgpt": "ChatGPT", "claude": "Claude", "copilot": "Copilot",
+    "cloudflare": "Cloudflare", "digitalocean": "DigitalOcean",
+    "surveymonkey": "SurveyMonkey", "mailgun": "Mailgun",
+    "google": "Google", "microsoft": "Microsoft", "wordpress": "WordPress",
+    "skilljar": "Skilljar", "tableau": "Tableau", "okta": "Okta",
+    "drupal": "Drupal", "mailchimp": "Mailchimp", "docusign": "DocuSign",
+    "starwatch": "STARWatch", "linkedin": "LinkedIn",
+}
+
+# Common grammar fixes: (pattern, replacement)
+_GRAMMAR_FIXES = [
+    # Double spaces
+    (re.compile(r"\s{2,}"), " "),
+    # Missing space after punctuation (but not in URLs or acronyms)
+    (re.compile(r"([a-z])\.([A-Z])"), r"\1. \2"),
+    # Lowercase "i" standing alone
+    (re.compile(r"\bi\b(?!\.\w)"), "I"),
+    # "i'm", "i've", "i'd", "i'll" → proper case
+    (re.compile(r"\bi'(m|ve|d|ll)\b", re.IGNORECASE), lambda m: f"I'{m.group(1).lower()}"),
+    # "dont" → "don't", "cant" → "can't", "wont" → "won't", "doesnt" → "doesn't"
+    (re.compile(r"\bdon'?t\b", re.IGNORECASE), "don't"),
+    (re.compile(r"\bdont\b", re.IGNORECASE), "don't"),
+    (re.compile(r"\bcan'?t\b", re.IGNORECASE), "can't"),
+    (re.compile(r"\bcant\b", re.IGNORECASE), "can't"),
+    (re.compile(r"\bwon'?t\b", re.IGNORECASE), "won't"),
+    (re.compile(r"\bwont\b", re.IGNORECASE), "won't"),
+    (re.compile(r"\bdoesn'?t\b", re.IGNORECASE), "doesn't"),
+    (re.compile(r"\bdoesnt\b", re.IGNORECASE), "doesn't"),
+    (re.compile(r"\bisn'?t\b", re.IGNORECASE), "isn't"),
+    (re.compile(r"\bisnt\b", re.IGNORECASE), "isn't"),
+    (re.compile(r"\bhasn'?t\b", re.IGNORECASE), "hasn't"),
+    (re.compile(r"\bhasnt\b", re.IGNORECASE), "hasn't"),
+    (re.compile(r"\bhaven'?t\b", re.IGNORECASE), "haven't"),
+    (re.compile(r"\bhavent\b", re.IGNORECASE), "haven't"),
+    (re.compile(r"\bwasn'?t\b", re.IGNORECASE), "wasn't"),
+    (re.compile(r"\bwasnt\b", re.IGNORECASE), "wasn't"),
+    (re.compile(r"\baren'?t\b", re.IGNORECASE), "aren't"),
+    (re.compile(r"\barent\b", re.IGNORECASE), "aren't"),
+    (re.compile(r"\bshouldn'?t\b", re.IGNORECASE), "shouldn't"),
+    (re.compile(r"\bshouldnt\b", re.IGNORECASE), "shouldn't"),
+    (re.compile(r"\bwouldn'?t\b", re.IGNORECASE), "wouldn't"),
+    (re.compile(r"\bwouldnt\b", re.IGNORECASE), "wouldn't"),
+    (re.compile(r"\bcouldn'?t\b", re.IGNORECASE), "couldn't"),
+    (re.compile(r"\bcouldnt\b", re.IGNORECASE), "couldn't"),
+    (re.compile(r"\bneed'?nt\b", re.IGNORECASE), "needn't"),
+    # "im" → "I'm" (only standalone)
+    (re.compile(r"\bim\b"), "I'm"),
+    # Strip trailing whitespace/punctuation artifacts
+    (re.compile(r"\s+$"), ""),
+]
+
+
+def _title_case_word(word: str, is_first: bool) -> str:
+    """Apply proper title case to a single word."""
+    lower = word.lower()
+
+    # Check brand names first
+    if lower in _BRAND_CASING:
+        return _BRAND_CASING[lower]
+
+    # Check acronyms
+    if lower in _ALWAYS_UPPER:
+        return word.upper()
+
+    # Category prefix like [Tooling] — leave as-is
+    if word.startswith("[") and word.endswith("]"):
+        return word
+
+    # Lowercase articles/prepositions unless first word
+    if not is_first and lower in _TITLE_CASE_LOWERCASE:
+        return lower
+
+    # Capitalize first letter, preserve rest (handles "ChatGPT" → "ChatGPT")
+    if word and word[0].islower():
+        return word[0].upper() + word[1:]
+
+    return word
+
+
+def normalize_title_grammar(title: str) -> str:
+    """Apply proper grammar, capitalization, and formatting to a suggested title.
+
+    - Title case (with smart exceptions for articles, prepositions, acronyms, brands)
+    - Fix common contractions and grammar issues
+    - Preserve category prefix brackets [Category]
+    - Handle special casing for known product/brand names
+    """
+    if not title or not title.strip():
+        return title
+
+    # Extract category prefix if present, process the rest separately
+    prefix = ""
+    body = title
+    bracket_match = re.match(r"^(\[.+?\])\s*", title)
+    if bracket_match:
+        prefix = bracket_match.group(1) + " "
+        body = title[bracket_match.end():]
+
+    if not body.strip():
+        return title
+
+    # Apply grammar fixes first (on the body)
+    for pattern, replacement in _GRAMMAR_FIXES:
+        body = pattern.sub(replacement, body)
+
+    # Fix multi-word brand names before title-casing individual words
+    _MULTI_WORD_BRANDS = [
+        (re.compile(r"\bdigital\s*ocean\b", re.IGNORECASE), "DigitalOcean"),
+        (re.compile(r"\bgoogle\s+drive\b", re.IGNORECASE), "Google Drive"),
+        (re.compile(r"\bgoogle\s+sheet[s]?\b", re.IGNORECASE), "Google Sheets"),
+        (re.compile(r"\bgoogle\s+doc[s]?\b", re.IGNORECASE), "Google Docs"),
+    ]
+    for pat, replacement in _MULTI_WORD_BRANDS:
+        body = pat.sub(replacement, body)
+
+    # Preserve filenames (e.g., security.txt, robots.txt) — mark them to skip title-casing
+    _filename_re = re.compile(r"\b(\w+\.(?:txt|json|xml|yaml|yml|csv|html|css|js|py|sh|md|log|cfg|conf|ini|env))\b", re.IGNORECASE)
+    _file_placeholders = {}
+    def _protect_filename(m):
+        placeholder = f"__FILE{len(_file_placeholders)}__"
+        _file_placeholders[placeholder] = m.group(0)
+        return placeholder
+    body = _filename_re.sub(_protect_filename, body)
+
+    # Apply title case word by word
+    words = body.split()
+    result_words = []
+    for i, word in enumerate(words):
+        is_first = (i == 0)
+
+        # Handle words with internal punctuation (e.g., "email—needs", "dns/domain")
+        # Split on em-dash and slash, title-case each part
+        if "—" in word and word != "—":
+            parts = word.split("—")
+            parts = [_title_case_word(p, is_first or j == 0) for j, p in enumerate(parts) if p]
+            result_words.append("—".join(parts))
+        elif word in ("—", "–", "-"):
+            result_words.append(word)
+        elif "/" in word and not word.startswith("http"):
+            parts = word.split("/")
+            parts = [_title_case_word(p, is_first) for p in parts if p]
+            result_words.append("/".join(parts))
+        else:
+            result_words.append(_title_case_word(word, is_first))
+
+    body = " ".join(result_words)
+
+    # Restore protected filenames
+    for placeholder, original in _file_placeholders.items():
+        body = body.replace(placeholder, original)
+
+    # Ensure body starts with uppercase after all processing
+    if body and body[0].islower():
+        body = body[0].upper() + body[1:]
+
+    return f"{prefix}{body}".strip()
+
+
 def build_suggested_title(title: str, description: str, comments: list[dict]) -> str:
     """Build a suggested title from the ticket description and comments."""
     # Strip URLs from title so they don't pollute keyword extraction
@@ -891,6 +1078,15 @@ def _build_best_effort_title(category: str, title: str, description: str, commen
 
 
 def suggest_title(ticket: dict, comments: list[dict]) -> dict:
+    """Analyze a ticket title and suggest improvements (with grammar normalization)."""
+    result = _suggest_title_raw(ticket, comments)
+    # Apply grammar/capitalization normalization to every non-empty suggestion
+    if result.get("suggested_title"):
+        result["suggested_title"] = normalize_title_grammar(result["suggested_title"])
+    return result
+
+
+def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
     """Analyze a ticket title using heuristic rules and suggest improvements."""
     current_title = ticket.get("subject", ticket.get("raw_subject", ""))
     description = ticket.get("description", "")
