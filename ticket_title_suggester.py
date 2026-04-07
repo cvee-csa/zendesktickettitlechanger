@@ -23,6 +23,7 @@ import json
 import time
 import logging
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from functools import wraps
 from collections import Counter
 
@@ -66,9 +67,9 @@ RETRY_BASE_DELAY = float(os.environ.get("RETRY_BASE_DELAY", "2.0"))
 # Maximum allowed title length for suggestions
 MAX_TITLE_LENGTH = 150
 
-# Report output
-PST = timezone(timedelta(hours=-8))
-_now = datetime.now(PST)
+# Report output — use US/Pacific so DST is handled automatically
+_PACIFIC = ZoneInfo("America/Los_Angeles")
+_now = datetime.now(_PACIFIC)
 NOW = _now.strftime("%Y-%m-%d_%I%M") + ("am" if _now.hour < 12 else "pm")
 REPORT_PATH = os.environ.get("OUTPUT_FILE", f"/tmp/IT_Ops_Title_Suggestions_{NOW}.xlsx")
 
