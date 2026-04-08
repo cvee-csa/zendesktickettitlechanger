@@ -1269,12 +1269,26 @@ def enhance_title(title: str, description: str, comments: list[dict]) -> str:
     for informal_pat, repl in _INFORMAL_PATTERNS:
         enhanced = informal_pat.sub(repl, enhanced).strip()
 
-    # --- Phase 4: Handle overly long titles (>75 chars) ---
+    # --- Phase 4: Handle overly long titles (>110 chars) ---
     # Try to extract a tighter summary from description
-    if len(enhanced) > 75:
+    if len(enhanced) > 110:
         desc = strip_html((description or "")[:2000])
         desc_clean = re.sub(r"https?://\S+", " ", desc)
         desc_clean = re.sub(r"\s+", " ", desc_clean).strip()
+
+        # Meta-commentary phrases that should never become titles
+        _meta_reject = re.compile(
+            r"(?:fine.?tune|tweak|adjust|look\s+(?:at|into)|figure\s+out|"
+            r"check\s+(?:on|this|that)|circle\s+back|follow\s+up|take\s+a\s+look|"
+            r"approve\s+(?:the\s+)?access\??|confirm\s+(?:that|this)|"
+            r"let\s+(?:me|us)\s+know|thanks\s*[!?]?\s*$|"
+            r"^\s*(?:this|that|it)\s+(?:a\s+bit|out|up))",
+            re.IGNORECASE,
+        )
+
+        # Build set of meaningful words from the original title for relevance check
+        _title_words = {w.lower() for w in re.findall(r"[a-zA-Z]{3,}", enhanced)}
+        _title_words -= STOP_WORDS
 
         # Look for a clear action/request sentence in the description
         # that might be more concise than the title
@@ -1285,24 +1299,32 @@ def enhance_title(title: str, description: str, comments: list[dict]) -> str:
         for rp in _request_patterns:
             m = rp.search(desc_clean[:500])
             if m:
-                candidate = m.group(1).strip().rstrip(" ,;:-–—")
+                candidate = m.group(1).strip().rstrip(" ,;:-–—?!")
+                # Reject meta-commentary candidates
+                if _meta_reject.search(candidate):
+                    continue
+                # Require topical overlap: at least 1 meaningful word in common with title
+                _cand_words = {w.lower() for w in re.findall(r"[a-zA-Z]{3,}", candidate)}
+                _cand_words -= STOP_WORDS
+                if not (_cand_words & _title_words):
+                    continue
                 # Only use if meaningfully shorter and still informative
                 if len(candidate) < len(enhanced) - 15 and len(candidate.split()) >= 4:
                     enhanced = candidate
                     break
 
         # If still too long, truncate at a natural break point
-        if len(enhanced) > 80:
+        if len(enhanced) > 110:
             # Try to cut at a natural boundary (dash, comma, period)
             for sep in [" — ", " – ", " - ", ", ", ": "]:
-                idx = enhanced.find(sep, 30)
-                if 30 < idx < 75:
+                idx = enhanced.find(sep, 40)
+                if 40 < idx < 100:
                     enhanced = enhanced[:idx]
                     break
             else:
                 # Hard truncate at word boundary
-                if len(enhanced) > 80:
-                    enhanced = enhanced[:77].rsplit(" ", 1)[0] + "..."
+                if len(enhanced) > 110:
+                    enhanced = enhanced[:107].rsplit(" ", 1)[0] + "..."
 
     # --- Phase 5: Supplement short titles with description context ---
     # If the title is descriptive but very short (<25 chars), add context
@@ -1425,8 +1447,12 @@ def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
             enhanced = enhance_title(cleaned_title, description, comments)
             category = detect_category(enhanced, description)
             prefixed = f"[{category}] {enhanced}"
-            if len(prefixed) > 100:
-                prefixed = prefixed[:97] + "..."
+            if len(prefixed) > 130:
+                # Truncate the enhanced part at a natural boundary, preserving the prefix
+                prefix_part = f"[{category}] "
+                max_enhanced = 130 - len(prefix_part)
+                truncated = enhanced[:max_enhanced].rsplit(" ", 1)[0]
+                prefixed = f"{prefix_part}{truncated}..."
             # Determine reason based on how much the title changed
             was_changed = enhanced.lower().strip() != cleaned_title.lower().strip()
             if was_changed:
