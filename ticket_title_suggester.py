@@ -1915,6 +1915,71 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
             es.row_dimensions[row_num].height = 28
             row_num += 1
 
+    # ── Claude Prompts sheet ────────────────────────────────────────────
+    # One prompt per actionable suggestion so Claude can update titles via
+    # the Zendesk API (or MCP tool).
+    actionable = [r for r in rows
+                  if r.get("Status") in ("Suggestion", "PII in Title")
+                  and r.get("Suggested Title")]
+    if actionable:
+        cp = wb.create_sheet("Claude Prompts")
+
+        # Header row
+        prompt_headers = ["Ticket #", "Current Title", "Suggested Title", "Claude Prompt"]
+        prompt_widths = [10, 40, 40, 90]
+        for ci, (h, w) in enumerate(zip(prompt_headers, prompt_widths), 1):
+            c = cp.cell(row=1, column=ci, value=h)
+            c.font = Font(name="Arial", bold=True, color="FFFFFF", size=11)
+            c.fill = PatternFill("solid", start_color=DARK_HEADER)
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = _border()
+            cp.column_dimensions[get_column_letter(ci)].width = w
+        cp.row_dimensions[1].height = 24
+
+        pr = 2  # prompt row counter
+        for r in actionable:
+            tid = r.get("Ticket #", "")
+            current = r.get("Current Title", "")
+            suggested = r.get("Suggested Title", "")
+
+            prompt = (
+                f"Update the subject/title of Zendesk ticket #{tid} "
+                f"from its current title \"{current}\" "
+                f"to the new title \"{suggested}\". "
+                f"Use the Zendesk API to make this change — call the "
+                f"update_ticket endpoint (PUT /api/v2/tickets/{tid}) "
+                f"with the payload: {{\"ticket\": {{\"subject\": \"{suggested}\"}}}}. "
+                f"Confirm the change was successful."
+            )
+
+            even = pr % 2 == 0
+            bg = "F7F9FC" if even else "FFFFFF"
+
+            # Col 1: Ticket #
+            tid_cell = cp.cell(row=pr, column=1, value=tid)
+            tid_cell.font = Font(name="Arial", bold=True, color=LINK_COLOR, underline="single", size=11)
+            tid_cell.alignment = Alignment(horizontal="center", vertical="top")
+            ticket_url = r.get("Ticket URL", "")
+            if ticket_url:
+                tid_cell.hyperlink = ticket_url
+            tid_cell.fill = PatternFill("solid", start_color=bg)
+            tid_cell.border = _border()
+
+            # Col 2: Current Title
+            _cell(cp, pr, 2, current, bg=bg, wrap=True)
+
+            # Col 3: Suggested Title
+            _cell(cp, pr, 3, suggested, bold=True, fc=SUGGEST_BADGE, bg=bg, wrap=True)
+
+            # Col 4: Claude Prompt
+            _cell(cp, pr, 4, prompt, bg=bg, wrap=True, size=10)
+
+            cp.row_dimensions[pr].height = 60
+            pr += 1
+
+        # Freeze header
+        cp.freeze_panes = "A2"
+
     wb.save(output_path)
     logger.info("Spreadsheet saved → %s (%d data rows)", output_path, len(rows))
 
