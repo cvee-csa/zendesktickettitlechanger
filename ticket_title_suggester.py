@@ -124,7 +124,7 @@ def strip_html(text: str) -> str:
 
 
 def clean_subject_line(title: str) -> str:
-    """Strip Re:/Fwd: chains, bracketed prefixes, and org suffixes from subject."""
+    """Strip Re:/Fwd: chains, bracketed prefixes, system tags, and org suffixes from subject."""
     if not title:
         return title
     cleaned = re.sub(
@@ -132,6 +132,14 @@ def clean_subject_line(title: str) -> str:
     ).strip()
     cleaned = re.sub(r"\[CloudSecurityAlliance\]\s*", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"\s*[-–—]\s*Cloud Security Alliance\s*$", "", cleaned, flags=re.IGNORECASE).strip()
+
+    # Strip automated system tags like [AAS.ZTAC.ZTResource], [AAS.Tasks.ScheduledTask]
+    cleaned = re.sub(r"\s*[-–—]?\s*\[AAS\.[^\]]+\]", "", cleaned, flags=re.IGNORECASE).strip()
+
+    # Treat placeholder values as empty ("null", "N/A", "(no subject)", "none", "untitled")
+    if re.match(r"^(?:null|n/?a|none|untitled|\(no\s+subject\)|no\s+subject|—|-|\.+)$", cleaned, re.IGNORECASE):
+        cleaned = ""
+
     return cleaned
 
 
