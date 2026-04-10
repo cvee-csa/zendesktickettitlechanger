@@ -1601,11 +1601,10 @@ PII_BADGE     = "E65100"
 SPAM_BADGE    = "9E9E9E"
 
 HEADERS = [
-    "Ticket #", "Status", "Current Title", "Suggested Title",
-    "Recommendation", "Reason", "Related Tickets",
-    "Ticket Status", "Requester", "Created", "Last Updated",
+    "Ticket #", "Title", "Action", "Reason",
+    "Ticket Status", "Requester", "Last Updated",
 ]
-WIDTHS = [10, 14, 44, 44, 18, 36, 18, 12, 20, 13, 13]
+WIDTHS = [10, 52, 18, 40, 12, 20, 13]
 
 
 # ---------------------------------------------------------------------------
@@ -1802,152 +1801,39 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
         lnk.fill = PatternFill("solid", start_color=bg)
         lnk.border = _border()
 
-        # Col 2: Status (colour-coded badge)
-        _cell(ws, cur_row, 2, status, bold=True, fc=badge_color, bg=bg, align="center")
-
-        # Col 3: Current Title
-        _cell(ws, cur_row, 3, r.get("Current Title", ""), bg=bg, wrap=True)
-
-        # Col 4: Suggested Title (bold green if suggestion)
+        # Col 2: Title (current + suggested combined)
+        current = r.get("Current Title", "")
         suggested = r.get("Suggested Title", "")
         if status == "Suggestion" and suggested:
-            _cell(ws, cur_row, 4, suggested, bold=True, fc=SUGGEST_BADGE, bg=bg, wrap=True)
+            # Rich text: current title on first line, arrow + suggested on second
+            title_cell = ws.cell(row=cur_row, column=2)
+            title_cell.value = f"{current}\n-> {suggested}"
+            title_cell.font = Font(name="Arial", size=11, color=badge_color)
+            title_cell.fill = PatternFill("solid", start_color=bg)
+            title_cell.alignment = Alignment(wrap_text=True, vertical="top")
+            title_cell.border = _border()
         else:
-            _cell(ws, cur_row, 4, suggested, bg=bg, wrap=True)
+            _cell(ws, cur_row, 2, current, bg=bg, wrap=True)
 
-        # Col 5: Recommendation
-        _cell(ws, cur_row, 5, r.get("Recommendation", ""), bold=True, fc=badge_color, bg=bg, align="center")
+        # Col 3: Action (merged Status + Recommendation)
+        _cell(ws, cur_row, 3, r.get("Recommendation", ""), bold=True, fc=badge_color, bg=bg, align="center")
 
-        # Col 6: Reason
-        _cell(ws, cur_row, 6, r.get("Reason", ""), bg=bg, wrap=True, size=10)
+        # Col 4: Reason
+        _cell(ws, cur_row, 4, r.get("Reason", ""), bg=bg, wrap=True, size=10)
 
-        # Col 7: Related Tickets
-        related = r.get("Related Tickets", "")
-        if related:
-            _cell(ws, cur_row, 7, related, fc=LINK_COLOR, bg=bg, wrap=True, size=10)
-        else:
-            _cell(ws, cur_row, 7, "", bg=bg)
+        # Col 5: Ticket Status
+        _cell(ws, cur_row, 5, r.get("Ticket Status", ""), bg=bg, align="center")
 
-        # Col 8: Ticket Status
-        _cell(ws, cur_row, 8, r.get("Ticket Status", ""), bg=bg, align="center")
+        # Col 6: Requester
+        _cell(ws, cur_row, 6, r.get("Requester", ""), bg=bg, align="center")
 
-        # Col 9: Requester
-        _cell(ws, cur_row, 9, r.get("Requester", ""), bg=bg, align="center")
-
-        # Col 10: Created
-        _cell(ws, cur_row, 10, r.get("Created", ""), bg=bg, align="center")
-
-        # Col 11: Last Updated
-        _cell(ws, cur_row, 11, r.get("Last Updated", ""), bg=bg, align="center")
+        # Col 7: Last Updated
+        _cell(ws, cur_row, 7, r.get("Last Updated", ""), bg=bg, align="center")
 
         ws.row_dimensions[cur_row].height = 48
         cur_row += 1
 
     ws.freeze_panes = f"A{HEADER_ROW + 1}"
-
-    # ── Executive Summary sheet ───────────────────────────────────────────
-    es = wb.create_sheet("Summary", 0)
-    today_str = _now.strftime("%Y-%m-%d")
-
-    es.merge_cells("A1:F1")
-    title_cell = es.cell(row=1, column=1, value=f"Title Suggestion Report — {today_str}")
-    title_cell.font = Font(name="Arial", bold=True, size=16, color="1F2D3D")
-    title_cell.alignment = Alignment(horizontal="left", vertical="center")
-    es.row_dimensions[1].height = 32
-
-    stats = [
-        ("Run Date",         run_meta["run_date"],          "1F2D3D"),
-        ("Tickets Scanned",  run_meta["tickets_scanned"],   "1F2D3D"),
-        ("Suggestions Made", run_meta["suggestions_made"],  SUGGEST_BADGE),
-        ("Titles Kept",      run_meta["titles_kept"],       KEEP_BADGE),
-        ("Manual Reviews",   run_meta.get("manual_reviews", 0), SKIP_BADGE),
-        ("Errors",           run_meta["errors"],            ERROR_BADGE),
-        ("PII Redaction",    "Enabled",                     "1F2D3D"),
-        ("Mode",             "Rule-Based (no AI API)",      "1F2D3D"),
-    ]
-    row_num = 3
-    for label, val, color in stats:
-        es.cell(row=row_num, column=1, value=label).font = Font(
-            name="Arial", bold=True, size=11, color="333333")
-        v = es.cell(row=row_num, column=2, value=val)
-        v.font = Font(name="Arial", bold=True, size=13, color=color)
-        v.alignment = Alignment(horizontal="left")
-        row_num += 1
-
-    # Breakdown stats
-    row_num += 1
-    es.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=2)
-    sec = es.cell(row=row_num, column=1, value="Issue Breakdown")
-    sec.font = Font(name="Arial", bold=True, size=12, color="1F2D3D")
-    sec.alignment = Alignment(horizontal="left", vertical="center")
-    row_num += 1
-
-    # Count automation tickets
-    automation_count = sum(1 for r in rows if "automated" in r.get("Reason", "").lower() or "auto-generated" in r.get("Reason", "").lower())
-    
-    # Count vague titles (Suggestion status but not automation, not PII)
-    vague_count = sum(1 for r in rows if r.get("Status") == "Suggestion" 
-                      and "automated" not in r.get("Reason", "").lower() 
-                      and "auto-generated" not in r.get("Reason", "").lower()
-                      and "personal information" not in r.get("Reason", "").lower())
-    
-    # Count PII in Title
-    pii_count = sum(1 for r in rows if r.get("Status") == "PII in Title")
-
-    breakdown_items = [
-        ("Automation Tickets", automation_count),
-        ("Vague Titles", vague_count),
-        ("PII in Title", pii_count),
-        ("Needs Manual Review", run_meta.get("manual_reviews", 0)),
-        ("Spam/Marketing", run_meta.get("spam_flagged", 0)),
-        ("Related/Duplicate Pairs", run_meta.get("related_tickets", 0)),
-    ]
-    for label, val in breakdown_items:
-        es.cell(row=row_num, column=1, value=label).font = Font(
-            name="Arial", bold=True, size=10, color="333333")
-        v = es.cell(row=row_num, column=2, value=int(val))
-        v.font = Font(name="Arial", bold=True, size=11, color="666666")
-        row_num += 1
-
-    # Top suggestions table
-    suggestions_only = [r for r in rows if r.get("Status") == "Suggestion"]
-    if suggestions_only:
-        row_num += 1
-        es.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=4)
-        sec = es.cell(row=row_num, column=1, value=f"Suggested Title Changes ({len(suggestions_only)})")
-        sec.font = Font(name="Arial", bold=True, size=13, color="FFFFFF")
-        sec.fill = PatternFill("solid", start_color=DARK_HEADER)
-        sec.alignment = Alignment(horizontal="left", vertical="center")
-        es.row_dimensions[row_num].height = 24
-        row_num += 1
-
-        top_headers = ["#", "Current Title", "Suggested Title", "Reason"]
-        top_widths = [10, 44, 44, 36]
-        for ci, (h, w) in enumerate(zip(top_headers, top_widths), 1):
-            c = es.cell(row=row_num, column=ci, value=h)
-            c.font = Font(name="Arial", bold=True, size=10, color="666666")
-            c.border = _border()
-            es.column_dimensions[get_column_letter(ci)].width = w
-        row_num += 1
-
-        for r in suggestions_only:
-            tid_cell = es.cell(row=row_num, column=1, value=r.get("Ticket #", ""))
-            tid_url = r.get("Ticket URL", "")
-            tid_cell.font = Font(name="Arial", color=LINK_COLOR, underline="single", size=11)
-            if tid_url:
-                tid_cell.hyperlink = tid_url
-            tid_cell.border = _border()
-
-            es.cell(row=row_num, column=2, value=r.get("Current Title", "")).border = _border()
-
-            sug_cell = es.cell(row=row_num, column=3, value=r.get("Suggested Title", ""))
-            sug_cell.font = Font(name="Arial", bold=True, color=SUGGEST_BADGE, size=11)
-            sug_cell.border = _border()
-
-            es.cell(row=row_num, column=4, value=r.get("Reason", "")).border = _border()
-
-            es.row_dimensions[row_num].height = 28
-            row_num += 1
 
     # ── Claude Prompts sheet ────────────────────────────────────────────
     # One prompt per actionable suggestion so Claude can update titles via
@@ -1959,8 +1845,8 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
         cp = wb.create_sheet("Claude Prompts")
 
         # Header row
-        prompt_headers = ["Ticket #", "Current Title", "Suggested Title", "Claude Prompt"]
-        prompt_widths = [10, 40, 40, 90]
+        prompt_headers = ["Ticket #", "Claude Prompt"]
+        prompt_widths = [10, 110]
         for ci, (h, w) in enumerate(zip(prompt_headers, prompt_widths), 1):
             c = cp.cell(row=1, column=ci, value=h)
             c.font = Font(name="Arial", bold=True, color="FFFFFF", size=11)
@@ -1980,10 +1866,8 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
                 f"Update the subject/title of Zendesk ticket #{tid} "
                 f"from its current title \"{current}\" "
                 f"to the new title \"{suggested}\". "
-                f"Use the Zendesk API to make this change — call the "
-                f"update_ticket endpoint (PUT /api/v2/tickets/{tid}) "
-                f"with the payload: {{\"ticket\": {{\"subject\": \"{suggested}\"}}}}. "
-                f"Confirm the change was successful."
+                f"Use the Zendesk API: PUT /api/v2/tickets/{tid} "
+                f"with payload: {{\"ticket\": {{\"subject\": \"{suggested}\"}}}}."
             )
 
             even = pr % 2 == 0
@@ -1999,16 +1883,10 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
             tid_cell.fill = PatternFill("solid", start_color=bg)
             tid_cell.border = _border()
 
-            # Col 2: Current Title
-            _cell(cp, pr, 2, current, bg=bg, wrap=True)
+            # Col 2: Claude Prompt
+            _cell(cp, pr, 2, prompt, bg=bg, wrap=True, size=10)
 
-            # Col 3: Suggested Title
-            _cell(cp, pr, 3, suggested, bold=True, fc=SUGGEST_BADGE, bg=bg, wrap=True)
-
-            # Col 4: Claude Prompt
-            _cell(cp, pr, 4, prompt, bg=bg, wrap=True, size=10)
-
-            cp.row_dimensions[pr].height = 60
+            cp.row_dimensions[pr].height = 48
             pr += 1
 
         # Freeze header
