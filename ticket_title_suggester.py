@@ -252,6 +252,36 @@ def fetch_open_tickets() -> list[dict]:
     return tickets[:MAX_TICKETS]
 
 
+_user_cache: dict[int, str] = {}
+
+
+def fetch_user_names(user_ids: list[int]) -> None:
+    """Batch-fetch user names from Zendesk and populate _user_cache."""
+    unknown = [uid for uid in user_ids if uid and uid not in _user_cache]
+    if not unknown:
+        return
+    # /users/show_many accepts up to 100 IDs per request
+    for i in range(0, len(unknown), 100):
+        batch = unknown[i:i + 100]
+        ids_param = ",".join(str(uid) for uid in batch)
+        url = f"{ZENDESK_BASE_URL}/users/show_many.json?ids={ids_param}"
+        try:
+            resp = requests.get(url, auth=zendesk_auth(), timeout=30)
+            resp.raise_for_status()
+            for user in resp.json().get("users", []):
+                _user_cache[user["id"]] = user.get("name", str(user["id"]))
+        except requests.RequestException as e:
+            logger.warning("Failed to fetch user names: %s", e)
+            for uid in batch:
+                _user_cache.setdefault(uid, str(uid))
+        time.sleep(ZENDESK_RATE_LIMIT_DELAY)
+
+
+def get_user_name(user_id: int) -> str:
+    """Return cached user name, falling back to the raw ID."""
+    return _user_cache.get(user_id, str(user_id))
+
+
 @retry_with_backoff()
 def fetch_ticket_comments(ticket_id: int) -> list[dict]:
     url = f"{ZENDESK_BASE_URL}/tickets/{ticket_id}/comments.json"
@@ -1374,6 +1404,53 @@ def suggest_title(ticket: dict, comments: list[dict]) -> dict:
     return result
 
 
+def _build_detailed_reason(original: str, cleaned: str, enhanced: str, category: str) -> str:
+    """Compare original vs. final title and list every change made."""
+    changes: list[str] = []
+
+    # 1. Re:/Fwd: stripped
+    if re.match(r"^(?:(?:re|fw|fwd)\s*:\s*)+", original, re.IGNORECASE):
+        changes.append("Stripped Re:/Fwd: prefix")
+
+    # 2. System tags removed
+    if re.search(r"\[AAS\.[^\]]+\]", original, re.IGNORECASE):
+        changes.append("Removed system tag (e.g. [AAS...])")
+
+    # 3. Org suffix removed
+    if re.search(r"[-–—]\s*Cloud Security Alliance\s*$", original, re.IGNORECASE):
+        changes.append("Removed org suffix")
+
+    if re.search(r"\[CloudSecurityAlliance\]", original, re.IGNORECASE):
+        changes.append("Removed [CloudSecurityAlliance] tag")
+
+    # 4. Capitalization changes (title case)
+    if cleaned and enhanced and cleaned.lower() == enhanced.lower() and cleaned != enhanced:
+        changes.append("Fixed capitalization (title case)")
+    elif cleaned and enhanced and cleaned.lower() != enhanced.lower():
+        # Content was actually rewritten/enhanced
+        changes.append("Enhanced wording")
+
+    # 5. Grammar fixes — check for specific patterns
+    if cleaned != enhanced:
+        # Check for common grammar fix signals
+        if re.search(r"\bi\b", cleaned) and not re.search(r"\bI\b", cleaned):
+            changes.append("Grammar: capitalized 'I'")
+        # Contraction fixes
+        for wrong, _right in [("dont", "don't"), ("cant", "can't"), ("wont", "won't"),
+                               ("isnt", "isn't"), ("doesnt", "doesn't"), ("its a", "it's a")]:
+            if wrong in cleaned.lower() and wrong not in enhanced.lower():
+                changes.append(f"Grammar: fixed '{wrong}'")
+                break
+
+    # 6. Category prefix added
+    changes.append(f"Added [{category}] prefix")
+
+    if not changes:
+        return f"Adding [{category}] prefix for triage"
+
+    return "; ".join(changes)
+
+
 def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
     """Analyze a ticket title using heuristic rules and suggest improvements."""
     current_title = ticket.get("subject", ticket.get("raw_subject", ""))
@@ -1456,17 +1533,12 @@ def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
             category = detect_category(enhanced, description)
             prefixed = f"[{category}] {enhanced}"
             if len(prefixed) > 130:
-                # Truncate the enhanced part at a natural boundary, preserving the prefix
                 prefix_part = f"[{category}] "
                 max_enhanced = 130 - len(prefix_part)
                 truncated = enhanced[:max_enhanced].rsplit(" ", 1)[0]
                 prefixed = f"{prefix_part}{truncated}..."
-            # Determine reason based on how much the title changed
-            was_changed = enhanced.lower().strip() != cleaned_title.lower().strip()
-            if was_changed:
-                reason = f"Enhanced title with [{category}] prefix — cleaned and improved from original"
-            else:
-                reason = f"Adding [{category}] prefix for triage — original title is descriptive"
+            # Build a detailed reason listing each change made
+            reason = _build_detailed_reason(current_title, cleaned_title, enhanced, category)
             return {
                 "suggested_title": prefixed,
                 "status": "Suggestion",
@@ -1986,6 +2058,12 @@ def main():
 
     logger.info("Found %d open tickets to analyze.", len(tickets))
 
+    # Batch-fetch requester names so every row shows a real name
+    all_requester_ids = [t.get("requester_id") for t in tickets if t.get("requester_id")]
+    if all_requester_ids:
+        logger.info("Fetching requester names for %d users...", len(set(all_requester_ids)))
+        fetch_user_names(list(set(all_requester_ids)))
+
     report_rows: list[dict] = []
     tickets_for_similarity: list[dict] = []  # for duplicate detection
     suggestion_count = 0
@@ -2002,10 +2080,9 @@ def main():
         updated_at = ticket.get("updated_at", "")
         ticket_url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/agent/tickets/{ticket_id}"
 
-        # Extract requester name
-        requester_name = ticket.get("via", {}).get("source", {}).get("from", {}).get("name", "")
-        if not requester_name:
-            requester_name = str(ticket.get("requester_id", ""))
+        # Resolve requester name from cache (batch-fetched above)
+        requester_id = ticket.get("requester_id")
+        requester_name = get_user_name(requester_id) if requester_id else ""
 
         logger.info("[%d/%d] Analyzing ticket #%s: %s", i, len(tickets), ticket_id, current_title)
 
