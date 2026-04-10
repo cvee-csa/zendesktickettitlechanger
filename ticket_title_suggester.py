@@ -1398,6 +1398,14 @@ def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
             "reason": "Title matches spam/marketing patterns — likely not a real support ticket",
         }
 
+    # Skip tickets whose title already has a [Category] prefix (already changed)
+    if re.match(r"^\[.+?\]\s", current_title):
+        return {
+            "suggested_title": "",
+            "status": "Already Categorized",
+            "reason": "Title already has a category prefix — skipping",
+        }
+
     # Check for automation/notification tickets
     if is_automation_ticket(cleaned_title, description):
         # Try to extract product name from multiple automation title formats
