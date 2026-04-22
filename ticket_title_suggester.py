@@ -498,6 +498,26 @@ def is_automation_ticket(title: str, description: str) -> bool:
 # Category detection for suggested titles
 # ---------------------------------------------------------------------------
 
+# Authoritative list of valid category prefixes and their descriptions.
+# detect_category() must return one of these keys. The descriptions are
+# written to a "Category Taxonomy" reference sheet in the XLSX report.
+VALID_CATEGORIES = {
+    "Access Request":  "Requests for access to systems, groups, tools, or permissions",
+    "Account Issue":   "Account lockouts, expirations, login failures",
+    "Billing":         "Invoices, renewals, payment issues, subscription management",
+    "Certification":   "Exam, course, badge, or credential inquiries",
+    "Configuration":   "Changes to settings, site config, forms, or integrations",
+    "Data/Reporting":  "Dashboards, analytics, data exports, report generation",
+    "Documentation":   "Creating, updating, or reviewing internal/external documentation",
+    "General Inquiry": "Questions or requests that don't fit other categories",
+    "Infrastructure":  "Hardware, networking, DNS, email config, server/system issues",
+    "Notification":    "Automated alerts, questionnaire comms, system notifications",
+    "OPS-PROJ":        "Internal IT Ops project tasks (format: [OPS-PROJ | P## | T#/#])",
+    "Security":        "Vulnerability, incident, breach, phishing, PII governance",
+    "STAR/Registry":   "STAR program or registry-specific requests",
+    "Tooling":         "Requests related to internal tools, SaaS platforms, integrations",
+}
+
 # ---------------------------------------------------------------------------
 # Two-pass category detection
 #
@@ -658,16 +678,67 @@ def detect_category(title: str, description: str) -> str:
     for category, patterns in _ACTION_PATTERNS:
         for pat in patterns:
             if pat.search(title):
-                return category
+                if category in VALID_CATEGORIES:
+                    return category
+                logger.warning("detect_category matched unknown category %r — falling through", category)
+                break
 
     # Pass 2: check title + description for context/subject
     text = f"{title} {(description or '')[:1500]}"
     for category, patterns in _CONTEXT_PATTERNS:
         for pat in patterns:
             if pat.search(text):
-                return category
+                if category in VALID_CATEGORIES:
+                    return category
+                logger.warning("detect_category matched unknown category %r — falling through", category)
+                break
 
     return "General Inquiry"
+
+
+def _title_from_url(title: str) -> str:
+    """Extract a human-readable title from a URL-based ticket title.
+
+    Parses the URL path segments, converts slugs (hyphens/underscores) to
+    spaces, drops common web path noise, and returns a Title Cased string.
+    Returns empty string if nothing meaningful can be extracted.
+    """
+    import urllib.parse
+    cleaned = title.strip().split("\n")[0].strip()  # take only first line if multiline
+    try:
+        parsed = urllib.parse.urlparse(cleaned if "://" in cleaned else f"https://{cleaned}")
+    except Exception:
+        return ""
+
+    path = parsed.path.strip("/")
+    if not path:
+        # Try query params or fragment
+        path = parsed.fragment or parsed.query
+    if not path:
+        return ""
+
+    # Take the last meaningful path segment
+    segments = [s for s in path.split("/") if s and s not in ("index", "index.html", "home", "default")]
+    if not segments:
+        return ""
+
+    slug = segments[-1]
+    # Remove file extensions
+    slug = re.sub(r"\.\w{2,5}$", "", slug)
+    # Convert slug to words
+    words = re.split(r"[-_+]+", slug)
+    words = [w for w in words if w and len(w) > 1]
+    if not words:
+        return ""
+
+    readable = " ".join(words)
+    readable = normalize_title_grammar(readable)
+
+    # Reject if result is too short or still looks like noise
+    if len(readable) < 5 or len(readable.split()) < 2:
+        return ""
+
+    return readable
 
 
 def is_url_title(title: str) -> bool:
@@ -1398,9 +1469,19 @@ def enhance_title(title: str, description: str, comments: list[dict]) -> str:
 def suggest_title(ticket: dict, comments: list[dict]) -> dict:
     """Analyze a ticket title and suggest improvements (with grammar normalization)."""
     result = _suggest_title_raw(ticket, comments)
-    # Apply grammar/capitalization normalization to every non-empty suggestion
-    if result.get("suggested_title"):
-        result["suggested_title"] = normalize_title_grammar(result["suggested_title"])
+
+    # Normalize title casing on all suggestions for consistency
+    suggested = result.get("suggested_title", "")
+    if suggested:
+        # Preserve the [Category] prefix, normalize the rest
+        prefix_match = re.match(r"^(\[[^\]]+\]\s*)", suggested)
+        if prefix_match:
+            prefix = prefix_match.group(1)
+            body = suggested[len(prefix):]
+            result["suggested_title"] = prefix + normalize_title_grammar(body)
+        else:
+            result["suggested_title"] = normalize_title_grammar(suggested)
+
     return result
 
 
@@ -1520,10 +1601,20 @@ def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
                     "status": "Suggestion",
                     "reason": reason,
                 }
+
+        # Fallback: build a best-effort title from description/comments
+        category = detect_category(cleaned_title, description)
+        best_effort = _build_best_effort_title(category, cleaned_title, description, comments)
+        if best_effort:
+            return {
+                "suggested_title": best_effort,
+                "status": "Suggestion",
+                "reason": "Title is from an automated/notification email; Added [" + category + "] prefix",
+            }
         return {
             "suggested_title": "",
-            "status": "Suggestion",
-            "reason": reason,
+            "status": "Needs Manual Review",
+            "reason": "Title is from an automated/notification email — needs a human-readable subject",
         }
 
     if not is_vague_title(cleaned_title):
@@ -1566,6 +1657,20 @@ def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
 
     # Generate a best-effort suggestion for manual review
     category = detect_category(cleaned_title, description)
+
+    # For URL titles, try to derive a readable title from the URL path first
+    if is_url_title(current_title):
+        url_title = _title_from_url(current_title)
+        if url_title:
+            prefixed = f"[{category}] {url_title}"
+            validated = validate_suggestion(prefixed, ticket["id"])
+            if validated:
+                return {
+                    "suggested_title": validated,
+                    "status": "Suggestion",
+                    "reason": "Title was a URL — replaced with descriptive subject; Added [" + category + "] prefix",
+                }
+
     best_effort = _build_best_effort_title(category, cleaned_title, description, comments)
 
     if is_url_title(current_title):
@@ -1823,6 +1928,7 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
     summary_items = [
         ("Tickets Scanned:",  str(run_meta["tickets_scanned"]),  "1F2D3D"),
         ("Suggestions Made:", str(run_meta["suggestions_made"]), SUGGEST_BADGE),
+        ("Needs Review:",     str(run_meta.get("manual_reviews", 0)), "F57F17"),
         ("Titles Kept:",      str(run_meta["titles_kept"]),      KEEP_BADGE),
         ("Errors:",           str(run_meta["errors"]),           ERROR_BADGE),
     ]
@@ -1963,6 +2069,24 @@ def write_xlsx_report(rows: list[dict], output_path: str, run_meta: dict):
 
         # Freeze header
         cp.freeze_panes = "A2"
+
+    # ── Category Taxonomy sheet ───────────────────────────────────────────
+    ct = wb.create_sheet("Category Taxonomy")
+    tax_headers = ["Prefix", "Description"]
+    for ci, (h, w) in enumerate(zip(tax_headers, [28, 60]), 1):
+        c = ct.cell(row=1, column=ci, value=h)
+        c.font = Font(name="Arial", bold=True, color="FFFFFF", size=11)
+        c.fill = PatternFill("solid", start_color=DARK_HEADER)
+        c.alignment = Alignment(horizontal="left", vertical="top")
+        c.border = _border()
+        ct.column_dimensions[get_column_letter(ci)].width = w
+    ct.row_dimensions[1].height = 24
+
+    for ri, (prefix, desc) in enumerate(sorted(VALID_CATEGORIES.items()), 2):
+        even = ri % 2 == 0
+        bg = "F7F9FC" if even else "FFFFFF"
+        _cell(ct, ri, 1, f"[{prefix}]", bold=True, bg=bg)
+        _cell(ct, ri, 2, desc, bg=bg, wrap=True)
 
     wb.save(output_path)
     logger.info("Spreadsheet saved → %s (%d data rows)", output_path, len(rows))
