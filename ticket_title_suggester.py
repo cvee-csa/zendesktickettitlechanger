@@ -539,6 +539,14 @@ _ACTION_PATTERNS = [
     ("Notification", [
         re.compile(r"^Notification\s*:", re.IGNORECASE),
         re.compile(r"^(?:Alert|Reminder|Scheduled\s+Task)\s*:", re.IGNORECASE),
+        # Rippling HR workflow notifications
+        re.compile(r"\bemployee\s+status\s+change\b", re.IGNORECASE),
+        # Google Workspace / shared drive invitations
+        re.compile(r"\byou(?:'ve| have) been added\b", re.IGNORECASE),
+        # Vendor "Action Required" product emails (Salesforce, Azure, etc.)
+        re.compile(r"^Action\s+Required\s*:", re.IGNORECASE),
+        # Generic vendor product/service notice subject lines
+        re.compile(r"^(?:Important\s+)?(?:Information|Notice|Update)\s+Regarding\b", re.IGNORECASE),
     ]),
     ("STAR/Registry", [
         re.compile(r"\b(star\s+registry|star\s+level|star\s+attestation|starwatch|caiq|ccm|grc\s+stack|trusted\s+cloud)\b", re.IGNORECASE),
@@ -576,6 +584,10 @@ _ACTION_PATTERNS = [
         re.compile(r"(run\s+a?\s*report|generate\s+report|pull\s+report|report\s+of\b)", re.IGNORECASE),
         re.compile(r"\blist\s+of\s+.{0,20}(user|member|account|email|active|staff)", re.IGNORECASE),
         re.compile(r"(data\s+request|data\s+pull|prepkit\s+download)", re.IGNORECASE),
+        # Lead/opt-in requests from survey reports
+        re.compile(r"\b(opt.?in\s+leads?|lead\s+list|lead\s+pull|survey\s+leads?|report\s+leads?)\b", re.IGNORECASE),
+        re.compile(r"\bleads?\s+for\s+.{0,40}(survey|report|program|campaign)\b", re.IGNORECASE),
+        re.compile(r"\b(3rd|third).?party.{0,20}leads?\b", re.IGNORECASE),
     ]),
     # Infrastructure (action) — subdomain/domain removal, decommission of hosted resources
     ("Infrastructure", [
@@ -596,7 +608,10 @@ _ACTION_PATTERNS = [
     ]),
     # Documentation — policy, publishing, CMS, working group pages, acknowledgements
     ("Documentation", [
-        re.compile(r"\b(document|documentation|wiki|guide|readme|runbook|playbook|knowledge\s+base|kb)\b", re.IGNORECASE),
+        re.compile(r"\b(document|documentation|wiki|guide|readme|runbook|playbook|knowledge\s+base|kb|whitepaper|white\s+paper|publication|glossary)\b", re.IGNORECASE),
+        # Content errors in published docs / glossary entries
+        re.compile(r"\b(typo|error|mistake|correction|not\s+in\s+agreement|header\s+acronym)\b.{0,40}\b(doc|page|glossary|article|entry|definition)\b", re.IGNORECASE),
+        re.compile(r"\b(copies|archived?\s+cop|archived?\s+version).{0,30}(whitepaper|paper|document|publication)\b", re.IGNORECASE),
         re.compile(r"(publish|publishing)\s+.{0,20}(doc|page|article|paper|policy|procedure|process|content)", re.IGNORECASE),
         re.compile(r"\b(policy|procedure|guideline|standard)\s+(document|for|on|about|creation|review|update|ensure|consistency)", re.IGNORECASE),
         re.compile(r"(create|update|review|ensure)\s+.{0,15}(policy|procedure|guideline)", re.IGNORECASE),
@@ -620,6 +635,16 @@ _ACTION_PATTERNS = [
 
 # Pass 2: context-based patterns (title + description) — what is the subject area?
 _CONTEXT_PATTERNS = [
+    # Notification — detect automated vendor/system emails by description body signals.
+    # Placed first so vendor emails are caught before their product name triggers Tooling.
+    ("Notification", [
+        re.compile(r"rippling\.com", re.IGNORECASE),
+        re.compile(r"\bworkflow\s+triggered\s+for\b", re.IGNORECASE),
+        re.compile(r"you\s+received\s+this\s+email\s+because\s+you\s+were\s+(?:invited|subscribed|added)", re.IGNORECASE),
+        re.compile(r"addressed\s+to\s+\*cloud\s+security\s+alliance\*", re.IGNORECASE),
+        re.compile(r"©\s*\d{4}\s+(?:Rippling|Salesforce|Google LLC|Microsoft)", re.IGNORECASE),
+        re.compile(r"\bproduct\s+(?:&|and)\s+service\s+notification\b", re.IGNORECASE),
+    ]),
     # Tooling BEFORE Infrastructure — so "tableau MCP server" hits Tooling, not Infra
     ("Tooling", [
         re.compile(r"\b(github|gitlab|jira|confluence|slack|zoom|teams|zendesk|airtable|zapier|salesforce|pardot|hubspot|mailgun|surveymonkey)\b", re.IGNORECASE),
@@ -661,6 +686,14 @@ _CONTEXT_PATTERNS = [
     # Data/Reporting (fallback)
     ("Data/Reporting", [
         re.compile(r"(csv|excel|spreadsheet|tableau|google\s+sheet)", re.IGNORECASE),
+        # Lead pull requests in description body
+        re.compile(r"\b(get|pull|send|share)\s+.{0,20}leads?\b", re.IGNORECASE),
+        re.compile(r"\bsurvey\s+report\b", re.IGNORECASE),
+    ]),
+    # Configuration (context fallback) — working group / admin setup detected in description
+    ("Configuration", [
+        re.compile(r"(setting\s+up|standard\s+process\s+for|everything\s+in\s+place\s+for)\s+.{0,50}working\s+group", re.IGNORECASE),
+        re.compile(r"\bcsa.?admin\b.{0,30}\b(working.?group|edit|setup)\b", re.IGNORECASE),
     ]),
 ]
 
