@@ -148,6 +148,7 @@ def clean_subject_line(title: str) -> str:
 # ---------------------------------------------------------------------------
 
 SPAM_PATTERNS = [
+    # SEO / guest post spam
     re.compile(r"(seo|guest\s*post|backlink|link\s*building|content\s*collaboration)", re.IGNORECASE),
     re.compile(r"(visitor\s*list|attendee\s*list)\s*(for|of|revealed|uncovered)", re.IGNORECASE),
     re.compile(r"(real\s*estate|dormitory|accommodation)\s*(available|opportunity|promotion|sites)", re.IGNORECASE),
@@ -156,6 +157,20 @@ SPAM_PATTERNS = [
     re.compile(r"(amazing|incredible|exclusive)\s*(content|collaboration|opportunity)", re.IGNORECASE),
     re.compile(r"elevate\s+your\s+.{0,20}\s*seo", re.IGNORECASE),
     re.compile(r"(guest\s*post|sponsored\s*post|paid\s*post)\s*(opportunity|inquiry|proposal)", re.IGNORECASE),
+    # Conference attendee / email list vendors (common CSA spam)
+    re.compile(r"\d[\d,]*\+?\s*.{0,30}(attendee|professional|executive|contact|delegate)s?.{0,20}(list|database|leads?)", re.IGNORECASE),
+    re.compile(r"(attendee|contact|email).{0,20}(list|database|data).{0,20}(conference|summit|expo|event)", re.IGNORECASE),
+    re.compile(r"reach\s+(cio|cto|ciso|vp|director|executive)s?\b.{0,40}(conference|summit|expo|event|attending)", re.IGNORECASE),
+    re.compile(r"(medical|hospital|physician|healthcare|clinic).{0,30}(email|contact|mailing).{0,20}(list|database|data)", re.IGNORECASE),
+    re.compile(r"(b2b|verified|targeted|opt.?in)\s*(email|contact|lead)\s*(list|database|data)", re.IGNORECASE),
+    # Job fair / hiring event spam
+    re.compile(r"(hiring|recruitment|job)\s*(fair|event|expo)\b", re.IGNORECASE),
+    re.compile(r"meet\s+(top\s+)?(hiring|employer|recruiter)s?\b", re.IGNORECASE),
+    # Telecom / ISP solicitation
+    re.compile(r"(gigabit|broadband|fiber|wireless).{0,20}(service|internet|connectivity).{0,20}(available|arrived|offer|just)", re.IGNORECASE),
+    # Generic sales pitch openers
+    re.compile(r"^(request\s+for\s+quotation|rfq|sales\s+inquiry|business\s+proposal)\s*$", re.IGNORECASE),
+    re.compile(r"opportunity\s+for\s+cloud\s+security\s+alliance", re.IGNORECASE),
 ]
 
 
@@ -502,20 +517,22 @@ def is_automation_ticket(title: str, description: str) -> bool:
 # detect_category() must return one of these keys. The descriptions are
 # written to a "Category Taxonomy" reference sheet in the XLSX report.
 VALID_CATEGORIES = {
-    "Access Request":  "Requests for access to systems, groups, tools, or permissions",
-    "Account Issue":   "Account lockouts, expirations, login failures",
-    "Billing":         "Invoices, renewals, payment issues, subscription management",
-    "Certification":   "Exam, course, badge, or credential inquiries",
-    "Configuration":   "Changes to settings, site config, forms, or integrations",
-    "Data/Reporting":  "Dashboards, analytics, data exports, report generation",
-    "Documentation":   "Creating, updating, or reviewing internal/external documentation",
-    "General Inquiry": "Questions or requests that don't fit other categories",
-    "Infrastructure":  "Hardware, networking, DNS, email config, server/system issues",
-    "Notification":    "Automated alerts, questionnaire comms, system notifications",
-    "OPS-PROJ":        "Internal IT Ops project tasks (format: [OPS-PROJ | P## | T#/#])",
-    "Security":        "Vulnerability, incident, breach, phishing, PII governance",
-    "STAR/Registry":   "STAR program or registry-specific requests",
-    "Tooling":         "Requests related to internal tools, SaaS platforms, integrations",
+    "Access Request":       "Requests for access to systems, groups, tools, or permissions",
+    "Account Issue":        "Account lockouts, expirations, login failures",
+    "Billing":              "Invoices, renewals, payment issues, subscription management",
+    "Certification":        "Exam, course, badge, or credential inquiries",
+    "Configuration":        "Changes to settings, site config, forms, or integrations",
+    "Data/Reporting":       "Dashboards, analytics, data exports, report generation",
+    "Documentation":        "Creating, updating, or reviewing internal/external documentation",
+    "General Inquiry":      "Questions or requests that don't fit other categories",
+    "Infrastructure":       "Hardware, networking, DNS, email config, server/system issues",
+    "Notification":         "Automated alerts, questionnaire comms, system notifications",
+    "Onboarding/Offboarding": "New employee provisioning or departing employee deprovisioning",
+    "OPS-PROJ":             "Internal IT Ops project tasks (format: [OPS-PROJ | P## | T#/#])",
+    "Security":             "Vulnerability, incident, breach, phishing, PII governance",
+    "STAR/Registry":        "STAR program or registry-specific requests",
+    "Tooling":              "Requests related to internal tools, SaaS platforms, integrations",
+    "Working Group":        "Working group setup, access, calendar, or page management",
 }
 
 # ---------------------------------------------------------------------------
@@ -553,6 +570,17 @@ _ACTION_PATTERNS = [
         re.compile(r"\bstar\s+(report|review|submission|listing|entry|profile)\b", re.IGNORECASE),
         re.compile(r"(registry|listing)\s+.{0,20}(review|update|entry|profile|submission)", re.IGNORECASE),
         re.compile(r"\blogo\s+.{0,15}\bstar\b", re.IGNORECASE),
+        re.compile(r"\bvalid.?ai.?ted\b", re.IGNORECASE),
+    ]),
+    # Onboarding/Offboarding — new hire provisioning or departing employee deprovisioning
+    ("Onboarding/Offboarding", [
+        re.compile(r"\b(onboard|offboard)\w*\b", re.IGNORECASE),
+        re.compile(r"\bnew\s+(hire|employee|staff|contractor|team\s+member)\b", re.IGNORECASE),
+        re.compile(r"\b(account\s+setup|account\s+provision|provision\s+account|provision\s+user)\b", re.IGNORECASE),
+        re.compile(r"\b(terminat\w*|deprovision\w*|deactivat\w*)\s+.{0,20}(account|access|user|license)\b", re.IGNORECASE),
+        re.compile(r"\b(delete|remov\w*)\s+.{0,30}(user\s+accounts?|m365\s+accounts?|microsoft\s*365?\s+.{0,10}accounts?|google\s+accounts?)\b", re.IGNORECASE),
+        re.compile(r"\b(employee|staff|user)\s+(departure|leaving|termination|exit|separation)\b", re.IGNORECASE),
+        re.compile(r"\b(last\s+day|first\s+day|start\s+date)\b.{0,30}(account|access|setup|email)\b", re.IGNORECASE),
     ]),
     # Certification — only exam/course/badge contexts, NOT generic "token" or "credential"
     ("Certification", [
@@ -575,7 +603,10 @@ _ACTION_PATTERNS = [
         re.compile(r"\b(add\w*|be\s+added)\b.{0,40}\balias\b", re.IGNORECASE),
         re.compile(r"\b(sso|oauth|login|sign.?in|password|mfa|2fa)\b", re.IGNORECASE),
         re.compile(r"verify\s+.{0,30}\b(on|in|has)\s+.{0,15}(account|team|access)", re.IGNORECASE),
+        re.compile(r"\b(role|privilege|permission)\s+(structure|setup|implement|define|establish)\b", re.IGNORECASE),
+        re.compile(r"\b(roles?\s+and\s+(privilege|permission)s?)\b", re.IGNORECASE),
         re.compile(r"\b(audit|review)\s+.{0,15}access\b", re.IGNORECASE),
+        re.compile(r"\bpermissions?\s+(to|for)\s+(edit|view|creat|delet|updat|manage|modify)\b", re.IGNORECASE),
         re.compile(r"\b(change|transfer)\s+.{0,40}(owner|ownership)\b", re.IGNORECASE),
     ]),
     # Data/Reporting — "list of users", "run a report", data exports
@@ -592,6 +623,13 @@ _ACTION_PATTERNS = [
     # Infrastructure (action) — subdomain/domain removal, decommission of hosted resources
     ("Infrastructure", [
         re.compile(r"\b(removal|decommission|retire|shut\s*down)\s+.{0,10}(of\s+)?\w+\.\w+\.\w+", re.IGNORECASE),
+    ]),
+    # Working Group — WG setup, access, calendar, and page management
+    ("Working Group", [
+        re.compile(r"\bworking\s+group\b", re.IGNORECASE),
+        re.compile(r"\bWG\s+\w", re.IGNORECASE),
+        re.compile(r"\bcsa\s+wg\b", re.IGNORECASE),
+        re.compile(r"\b(chapter\s+(meeting|page|access|setup|calendar|event|member))\b", re.IGNORECASE),
     ]),
     # Configuration — BEFORE Documentation so "SLA Policy" = Config, not Documentation
     ("Configuration", [
@@ -615,7 +653,7 @@ _ACTION_PATTERNS = [
         re.compile(r"(publish|publishing)\s+.{0,20}(doc|page|article|paper|policy|procedure|process|content)", re.IGNORECASE),
         re.compile(r"\b(policy|procedure|guideline|standard)\s+(document|for|on|about|creation|review|update|ensure|consistency)", re.IGNORECASE),
         re.compile(r"(create|update|review|ensure)\s+.{0,15}(policy|procedure|guideline)", re.IGNORECASE),
-        re.compile(r"\bcms\b(?!.*(?:malware|virus|threat))", re.IGNORECASE),
+        re.compile(r"\bcms\b.{0,40}(?:content|page|site|publish|article|template|creat|manag)|(?:content|page|publish|site|article|template|manag).{0,40}\bcms\b", re.IGNORECASE),
         re.compile(r"(content\s+management|working\s+group\s+page|managing\s+.{0,15}page)", re.IGNORECASE),
         re.compile(r"(acknowledge?ments?|privacy\s+policy|topic\s+filter)\b", re.IGNORECASE),
         re.compile(r"\b(guidance|guideline)\s+(for|on|about)", re.IGNORECASE),
@@ -630,6 +668,8 @@ _ACTION_PATTERNS = [
         re.compile(r"\bsecurity\s+(audit|review|scan|assessment|incident|alert|patch)\b", re.IGNORECASE),
         re.compile(r"\b(decommission\w*)\s+.{0,30}(pii|data|privacy|governance)", re.IGNORECASE),
         re.compile(r"clean\w*\s+.{0,15}(stale|old|unused)\s+.{0,10}(token|key|secret|credential)", re.IGNORECASE),
+        re.compile(r"\b(dpo|data\s+subject\s+request|data\s+deletion|data\s+removal|right\s+to\s+erasure|right\s+to\s+be\s+forgotten)\b", re.IGNORECASE),
+        re.compile(r"\b(gdpr|ccpa)\s+.{0,30}(request|deletion|removal|compli)", re.IGNORECASE),
     ]),
 ]
 
@@ -645,12 +685,18 @@ _CONTEXT_PATTERNS = [
         re.compile(r"©\s*\d{4}\s+(?:Rippling|Salesforce|Google LLC|Microsoft)", re.IGNORECASE),
         re.compile(r"\bproduct\s+(?:&|and)\s+service\s+notification\b", re.IGNORECASE),
     ]),
+    # STAR/Registry (context fallback) — Valid-AI-ted and STAR submission signals in body
+    ("STAR/Registry", [
+        re.compile(r"\bvalid.?ai.?ted\b", re.IGNORECASE),
+        re.compile(r"\bstar\.watch\b", re.IGNORECASE),
+        re.compile(r"\bstar\s+submission\b", re.IGNORECASE),
+    ]),
     # Tooling BEFORE Infrastructure — so "tableau MCP server" hits Tooling, not Infra
     ("Tooling", [
         re.compile(r"\b(github|gitlab|jira|confluence|slack|zoom|teams|zendesk|airtable|zapier|salesforce|pardot|hubspot|mailgun|surveymonkey)\b", re.IGNORECASE),
-        re.compile(r"\b(chatgpt|claude|copilot|ai\s+license|ai\s+vendor|qms\s+chat\s*bot)\b", re.IGNORECASE),
+        re.compile(r"\b(chatgpt|claude|copilot|anthropic|ai\s+license|ai\s+vendor|qms\s+chat\s*bot)\b", re.IGNORECASE),
         re.compile(r"(consolidat|migrat|decommission|integrat)\w*\s+.{0,30}(tool|platform|service|account|license|subscription)", re.IGNORECASE),
-        re.compile(r"\b(mcp\s+server|tableau)\b", re.IGNORECASE),
+        re.compile(r"\bmcp\s+server\b", re.IGNORECASE),
         re.compile(r"\bRIT\b"),
     ]),
     # Infrastructure — servers, DNS, cloud providers, backups, firmware
@@ -690,10 +736,22 @@ _CONTEXT_PATTERNS = [
         re.compile(r"\b(get|pull|send|share)\s+.{0,20}leads?\b", re.IGNORECASE),
         re.compile(r"\bsurvey\s+report\b", re.IGNORECASE),
     ]),
-    # Configuration (context fallback) — working group / admin setup detected in description
+    # Configuration (context fallback) — general admin setup detected in description
     ("Configuration", [
+        re.compile(r"\bcsa.?admin\b.{0,30}\b(edit|setup|config)\b", re.IGNORECASE),
+    ]),
+    # Working Group (context fallback) — detected in description
+    ("Working Group", [
+        re.compile(r"\bworking\s+group\b", re.IGNORECASE),
         re.compile(r"(setting\s+up|standard\s+process\s+for|everything\s+in\s+place\s+for)\s+.{0,50}working\s+group", re.IGNORECASE),
-        re.compile(r"\bcsa.?admin\b.{0,30}\b(working.?group|edit|setup)\b", re.IGNORECASE),
+        re.compile(r"\bcsa.?admin\b.{0,30}\b(working.?group)\b", re.IGNORECASE),
+    ]),
+    # Onboarding/Offboarding (context fallback) — detected in description
+    ("Onboarding/Offboarding", [
+        re.compile(r"\b(onboard|offboard)\w*\b", re.IGNORECASE),
+        re.compile(r"\bnew\s+(hire|employee|staff|contractor)\b", re.IGNORECASE),
+        re.compile(r"\b(deprovision|deactivat\w+)\s+.{0,20}(account|user|access)\b", re.IGNORECASE),
+        re.compile(r"\b(rippling|bamboohr|workday)\b.{0,50}\b(new|depart|terminat|start)\b", re.IGNORECASE),
     ]),
 ]
 
@@ -892,6 +950,10 @@ _ALWAYS_UPPER = {
     "sftp", "ftp", "ssh", "sql", "json", "xml", "yaml", "rsa",
     "soc", "iso", "nist", "cis", "iam", "rbac", "cidr", "cdn",
     "grc", "404",
+    # CSA-specific
+    "taise", "orbs", "star", "caiq",
+    # Common IT/business acronyms missing from original list
+    "hr", "lms", "crm", "erp", "itsm", "itil",
 }
 
 # Brand names that have specific capitalization
@@ -907,6 +969,8 @@ _BRAND_CASING = {
     "skilljar": "Skilljar", "tableau": "Tableau", "okta": "Okta",
     "drupal": "Drupal", "mailchimp": "Mailchimp", "docusign": "DocuSign",
     "starwatch": "STARWatch", "linkedin": "LinkedIn",
+    "rippling": "Rippling", "bamboohr": "BambooHR", "skilljar": "Skilljar",
+    "pearsonvue": "Pearson VUE", "pearson": "Pearson",
 }
 
 # Common grammar fixes: (pattern, replacement)
@@ -1160,8 +1224,9 @@ def build_suggested_title(title: str, description: str, comments: list[dict]) ->
         else:
             suggested = action
     else:
-        # Fallback: just use top keywords
-        suggested = " ".join(other_keywords[:5]).capitalize()
+        # Fallback: title-case each keyword rather than raw lowercase concatenation
+        titled = " ".join(w.capitalize() for w in other_keywords[:5])
+        suggested = titled if titled else ""
 
     # Final cleanup
     suggested = suggested.strip(" —-:")
@@ -1200,9 +1265,9 @@ def build_suggested_title(title: str, description: str, comments: list[dict]) ->
     category = detect_category(title, description)
     suggested = f"[{category}] {suggested}"
 
-    # Enforce max length
-    if len(suggested) > 100:
-        suggested = suggested[:97] + "..."
+    # Enforce max length (align with MAX_TITLE_LENGTH constant)
+    if len(suggested) > MAX_TITLE_LENGTH:
+        suggested = suggested[:MAX_TITLE_LENGTH - 3] + "..."
 
     return suggested if len(suggested) >= 10 else ""
 
@@ -1589,8 +1654,28 @@ def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
             "reason": "Title matches spam/marketing patterns — likely not a real support ticket",
         }
 
-    # Skip tickets whose title already has a [Category] prefix (already changed)
-    if re.match(r"^\[.+?\]\s", current_title):
+    # Check tickets whose title already has a [Category] prefix
+    existing_prefix_match = re.match(r"^\[(.+?)\]\s", current_title)
+    if existing_prefix_match:
+        existing_category = existing_prefix_match.group(1)
+        # If the existing category is valid and matches what we'd detect, skip
+        if existing_category in VALID_CATEGORIES:
+            title_body = current_title[existing_prefix_match.end():]
+            correct_category = detect_category(title_body, description)
+            if correct_category == existing_category:
+                return {
+                    "suggested_title": "",
+                    "status": "Already Categorized",
+                    "reason": "Title already has a correct category prefix — skipping",
+                }
+            # Category is wrong — suggest a correction
+            corrected = f"[{correct_category}] {title_body}"
+            return {
+                "suggested_title": corrected,
+                "status": "Suggestion",
+                "reason": f"Recategorized from [{existing_category}] to [{correct_category}]",
+            }
+        # Unknown/custom prefix (e.g. [OPS-PROJ | P## | T#/#]) — always skip
         return {
             "suggested_title": "",
             "status": "Already Categorized",
@@ -1599,6 +1684,22 @@ def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
 
     # Check for automation/notification tickets
     if is_automation_ticket(cleaned_title, description):
+        # Special case: STAR Submission contact form titles
+        # Format: "STAR Submission <ID> from <email>" — strip ID, keep domain
+        _star_submission_re = re.compile(
+            r"^(?:invoice\s+requested\s*~\s*)?STAR\s+(?:Contact\s+Form|Submission)\s+\S+\s+from\s+(\S+@(\S+))",
+            re.IGNORECASE,
+        )
+        _star_m = _star_submission_re.match(cleaned_title)
+        if _star_m:
+            domain = _star_m.group(2).rstrip(".")
+            suggested = f"[STAR/Registry] New STAR Submission — {domain}"
+            return {
+                "suggested_title": suggested,
+                "status": "Suggestion",
+                "reason": "STAR submission contact form — stripped form ID, preserved submitter domain",
+            }
+
         # Try to extract product name from multiple automation title formats
         _automation_extractors = [
             (re.compile(r"purchase notification for (.+)", re.IGNORECASE), "Purchase Notification"),
@@ -1607,6 +1708,7 @@ def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
             (re.compile(r"receipt for (?:your )?(?:purchase of )?(.+)", re.IGNORECASE), "Receipt"),
             (re.compile(r"order confirmation[:\s]+(.+)", re.IGNORECASE), "Order Confirmation"),
             (re.compile(r"payment of \$[\d.,]+ from .+ for (.+)", re.IGNORECASE), "Payment Received"),
+            (re.compile(r"valid.?ai.?ted\b", re.IGNORECASE), "Valid-AI-ted Notification"),
         ]
         for pat, notif_type in _automation_extractors:
             m = pat.search(current_title)
