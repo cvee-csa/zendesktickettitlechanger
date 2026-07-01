@@ -150,7 +150,9 @@ def clean_subject_line(title: str) -> str:
 SPAM_PATTERNS = [
     # SEO / guest post spam
     re.compile(r"(seo|guest\s*post|backlink|link\s*building|content\s*collaboration)", re.IGNORECASE),
-    re.compile(r"(visitor\s*list|attendee\s*list)\s*(for|of|revealed|uncovered)", re.IGNORECASE),
+    re.compile(r"(visitor\s*list|attendee\s*list)\s*(for|of|revealed|uncovered|$)", re.IGNORECASE),
+    re.compile(r"\b(visitor|attendee|delegate)\s+list\b", re.IGNORECASE),
+    re.compile(r"\b(expo|summit|conference|event).{0,40}\b(list|database|emails?)\b", re.IGNORECASE),
     re.compile(r"(real\s*estate|dormitory|accommodation)\s*(available|opportunity|promotion|sites)", re.IGNORECASE),
     re.compile(r"(high\s*authority|da\s*\d+|domain\s*authority)", re.IGNORECASE),
     re.compile(r"plan\s*your\s*visit\s*to", re.IGNORECASE),
@@ -517,22 +519,28 @@ def is_automation_ticket(title: str, description: str) -> bool:
 # detect_category() must return one of these keys. The descriptions are
 # written to a "Category Taxonomy" reference sheet in the XLSX report.
 VALID_CATEGORIES = {
-    "Access Request":       "Requests for access to systems, groups, tools, or permissions",
-    "Account Issue":        "Account lockouts, expirations, login failures",
-    "Billing":              "Invoices, renewals, payment issues, subscription management",
-    "Certification":        "Exam, course, badge, or credential inquiries",
-    "Configuration":        "Changes to settings, site config, forms, or integrations",
-    "Data/Reporting":       "Dashboards, analytics, data exports, report generation",
-    "Documentation":        "Creating, updating, or reviewing internal/external documentation",
-    "General Inquiry":      "Questions or requests that don't fit other categories",
-    "Infrastructure":       "Hardware, networking, DNS, email config, server/system issues",
-    "Notification":         "Automated alerts, questionnaire comms, system notifications",
+    # ── IT Ops core work ────────────────────────────────────────────────────────
+    "Access Request":         "Grant or revoke access to systems, tools, groups, or admin roles",
+    "Account Issue":          "Locked, expired, or broken accounts; login and authentication failures",
+    "Automation":             "Workflow automation, API integrations, webhooks, scripted processes",
+    "Configuration":          "Settings changes — Zendesk, email routing, forms, redirects, SLA policies",
+    "Data/Reporting":         "Data exports, dashboards, analytics, report generation, lead pulls",
+    "Infrastructure":         "DNS, SSL/TLS, servers, cloud hosting, email deliverability, Cloudflare",
     "Onboarding/Offboarding": "New employee provisioning or departing employee deprovisioning",
-    "OPS-PROJ":             "Internal IT Ops project tasks (format: [OPS-PROJ | P## | T#/#])",
-    "Security":             "Vulnerability, incident, breach, phishing, PII governance",
-    "STAR/Registry":        "STAR program or registry-specific requests",
-    "Tooling":              "Requests related to internal tools, SaaS platforms, integrations",
-    "Working Group":        "Working group setup, access, calendar, or page management",
+    "OPS-PROJ":               "Internal IT Ops project tasks (format: [OPS-PROJ | P## | T#/#])",
+    "Security":               "Incidents, phishing, credential rotation, vulnerability, PII governance",
+    "RIT":                    "CSA's Resource and Information Tracker — access, content, or technical issues",
+    "Tooling":                "SaaS platform management, license requests, tool procurement",
+    "Working Group":          "WG IT support — calendar, access, page setup, member provisioning",
+    # ── IT Ops managed platforms ─────────────────────────────────────────────
+    "Skilljar":               "CSA's LMS — course access, enrollment, completion, training issues",
+    # ── Routing labels (not IT Ops work — route to appropriate team) ─────────
+    "Certification":          "Exam, course, or credential question — route to Education team",
+    "Membership":             "Membership inquiry or application — route to Membership team",
+    "STAR/Registry":          "STAR program or registry question — route to STAR team",
+    # ── Administrative / routing ─────────────────────────────────────────────
+    "Automated Notification": "System-generated alerts, vendor notifications, workflow emails",
+    "Needs Triage":           "Uncategorized or misdirected — review and route to the right team",
 }
 
 # ---------------------------------------------------------------------------
@@ -553,9 +561,13 @@ VALID_CATEGORIES = {
 _ACTION_PATTERNS = [
     # STAR/Registry — very specific program, always wins
     # Notification — automated/scheduled task alerts (match before anything else)
-    ("Notification", [
+    ("Automated Notification", [
         re.compile(r"^Notification\s*:", re.IGNORECASE),
         re.compile(r"^(?:Alert|Reminder|Scheduled\s+Task)\s*:", re.IGNORECASE),
+        # Purchase / registration confirmations
+        re.compile(r"^purchase\s+notification\s+for\b", re.IGNORECASE),
+        re.compile(r"^registration\s+notification\s+for\b", re.IGNORECASE),
+        re.compile(r"^csa\s+support\s+notice\b", re.IGNORECASE),
         # Rippling HR workflow notifications
         re.compile(r"\bemployee\s+status\s+change\b", re.IGNORECASE),
         # Google Workspace / shared drive invitations
@@ -567,10 +579,12 @@ _ACTION_PATTERNS = [
     ]),
     ("STAR/Registry", [
         re.compile(r"\b(star\s+registry|star\s+level|star\s+attestation|starwatch|caiq|ccm|grc\s+stack|trusted\s+cloud)\b", re.IGNORECASE),
-        re.compile(r"\bstar\s+(report|review|submission|listing|entry|profile)\b", re.IGNORECASE),
+        re.compile(r"\bstar\s+(report|review|submission|listing|entry|profile|contact\s+form)\b", re.IGNORECASE),
+        re.compile(r"\ba\s+star\s+contact\s+form\s+has\s+been\s+filed\b", re.IGNORECASE),
         re.compile(r"(registry|listing)\s+.{0,20}(review|update|entry|profile|submission)", re.IGNORECASE),
         re.compile(r"\blogo\s+.{0,15}\bstar\b", re.IGNORECASE),
         re.compile(r"\bvalid.?ai.?ted\b", re.IGNORECASE),
+        re.compile(r"\b(aicm|ai\s+controls\s+matrix)\b", re.IGNORECASE),
     ]),
     # Onboarding/Offboarding — new hire provisioning or departing employee deprovisioning
     ("Onboarding/Offboarding", [
@@ -582,17 +596,38 @@ _ACTION_PATTERNS = [
         re.compile(r"\b(employee|staff|user)\s+(departure|leaving|termination|exit|separation)\b", re.IGNORECASE),
         re.compile(r"\b(last\s+day|first\s+day|start\s+date)\b.{0,30}(account|access|setup|email)\b", re.IGNORECASE),
     ]),
-    # Certification — only exam/course/badge contexts, NOT generic "token" or "credential"
-    ("Certification", [
-        re.compile(r"\b(ccsk|ccak|cczt|certificate\s+of\s+cloud)\b", re.IGNORECASE),
-        re.compile(r"\b(certification|exam)\b(?!.*(?:stale|rotat|clean))", re.IGNORECASE),
-        re.compile(r"\b(badge|voucher)\b", re.IGNORECASE),
-        re.compile(r"(training|course|learning|study)\s+(material|access|platform|portal)", re.IGNORECASE),
+    # Skilljar — CSA's LMS; must be before Billing and Certification so "CSA Tools course access" → Skilljar
+    ("Skilljar", [
+        re.compile(r"\bskilljar\b", re.IGNORECASE),
+        re.compile(r"\bcsa\s+(lms|training\s+platform|learning\s+platform)\b", re.IGNORECASE),
+        re.compile(r"\bintro(?:duction)?\s+to\s+csa\s+tools?\b", re.IGNORECASE),
+        re.compile(r"\bcsa\s+tools?\s+(course|training|module|lesson|platform)\b", re.IGNORECASE),
     ]),
-    # Billing — renewal/invoice/payment takes priority over tool name
+    # Billing — invoice/payment intent beats certification context (e.g. "Invoice for Exam Bundle")
     ("Billing", [
         re.compile(r"(invoice|receipt|refund|credit|charge|payment|billing|renewal\s+quote|pricing|cost)\b", re.IGNORECASE),
         re.compile(r"(purchase|bought|paid|order)\s+.{0,30}(but|however|issue|problem|wrong|error)", re.IGNORECASE),
+        re.compile(r"\bpay\s+.{0,30}(training|course|exam|certification)\b", re.IGNORECASE),
+        re.compile(r"\bpayment\s+(option|method|plan)\b", re.IGNORECASE),
+    ]),
+    # Certification — only exam/course/badge contexts, NOT generic "token" or "credential"
+    ("Certification", [
+        re.compile(r"\b(ccsk|ccak|cczt|taise|certificate\s+of\s+cloud|trusted\s+ai\s+safety\s+expert)\b", re.IGNORECASE),
+        re.compile(r"\b(certification|exam)\b(?!.*(?:stale|rotat|clean))", re.IGNORECASE),
+        re.compile(r"\b(badge|voucher)\b", re.IGNORECASE),
+        re.compile(r"\bcertificate\s+(not\s+found|missing|lost|expired?|invalid)\b", re.IGNORECASE),
+        re.compile(r"(training|course|learning|study)\s+(material|access|platform|portal)", re.IGNORECASE),
+    ]),
+    # Membership — routing label; wins early so "Membership Inquiry" doesn't fall through
+    ("Membership", [
+        re.compile(r"\bmembership\s+(inquiry|application|question|request|information|form)\b", re.IGNORECASE),
+        re.compile(r"\b(join|apply\s+for)\s+.{0,20}(csa|membership)\b", re.IGNORECASE),
+        re.compile(r"\bindividual\s+contributor\s+information\b", re.IGNORECASE),
+    ]),
+    # RIT — specific CSA tool; must come before Access Request so "RIT access" → RIT, not Access Request
+    ("RIT", [
+        re.compile(r"\bRIT\b"),
+        re.compile(r"\bresource\s+and\s+information\s+tracker\b", re.IGNORECASE),
     ]),
     # Access Request — BEFORE Tooling so "Mailgun access" = Access, not Tooling
     ("Access Request", [
@@ -630,12 +665,21 @@ _ACTION_PATTERNS = [
         re.compile(r"\bWG\s+\w", re.IGNORECASE),
         re.compile(r"\bcsa\s+wg\b", re.IGNORECASE),
         re.compile(r"\b(chapter\s+(meeting|page|access|setup|calendar|event|member))\b", re.IGNORECASE),
+        re.compile(r"\bmessage\s+for\s+.{0,40}chapter\b", re.IGNORECASE),
+    ]),
+    # Automation — webhook/API/script automation; BEFORE Configuration to win on "automate workflow"
+    ("Automation", [
+        re.compile(r"\b(zapier|make\.com|integromat|n8n|automate\.io)\b", re.IGNORECASE),
+        re.compile(r"\b(webhook|api\s+integration|api\s+automation|api\s+connect)\b", re.IGNORECASE),
+        re.compile(r"\bautomat\w+\s+.{0,30}(workflow|process|task|email|report|trigger)\b", re.IGNORECASE),
+        re.compile(r"\b(cron\s+job|scheduled\s+job|batch\s+job|script\s+run)\b", re.IGNORECASE),
+        re.compile(r"\b(rpa|robotic\s+process\s+automation)\b", re.IGNORECASE),
     ]),
     # Configuration — BEFORE Documentation so "SLA Policy" = Config, not Documentation
     ("Configuration", [
         re.compile(r"(config|setting|setup|enable|disable|toggle|update|modify|change)\s+.{0,30}(setting|config|option|feature|flag|policy|rule)", re.IGNORECASE),
         re.compile(r"\b(redirect|rewrite|iframe|embed|sitemap|robots\.txt)\b", re.IGNORECASE),
-        re.compile(r"(workflow|automation|trigger|schedule|cron|sla\s+polic)", re.IGNORECASE),
+        re.compile(r"(workflow|trigger|schedule|sla\s+polic)", re.IGNORECASE),
         re.compile(r"(set\s*up|creat|build|configur)\w*\s+.{0,30}(form|page|template|landing|portal|widget)", re.IGNORECASE),
         re.compile(r"(link\s+between|connect)\s+.{0,30}(base|table|system|platform)", re.IGNORECASE),
         re.compile(r"\b(convert|migrat)\w*\s+.{0,20}account", re.IGNORECASE),
@@ -643,6 +687,8 @@ _ACTION_PATTERNS = [
         re.compile(r"\b(member\s+)?benefit\s+form\b", re.IGNORECASE),
         re.compile(r"\bcontent\s+group\s+.{0,15}(link|fix|url|update|broken)", re.IGNORECASE),
         re.compile(r"\badd\s+.{0,15}\bto\s+.{0,15}(email|notification|template|sign.?up)", re.IGNORECASE),
+        re.compile(r"\bemail\s+forwarding\b", re.IGNORECASE),
+        re.compile(r"\b(forward|redirect)\s+.{0,20}(email|mail|inbox)\b", re.IGNORECASE),
     ]),
     # Documentation — policy, publishing, CMS, working group pages, acknowledgements
     ("Documentation", [
@@ -677,7 +723,7 @@ _ACTION_PATTERNS = [
 _CONTEXT_PATTERNS = [
     # Notification — detect automated vendor/system emails by description body signals.
     # Placed first so vendor emails are caught before their product name triggers Tooling.
-    ("Notification", [
+    ("Automated Notification", [
         re.compile(r"rippling\.com", re.IGNORECASE),
         re.compile(r"\bworkflow\s+triggered\s+for\b", re.IGNORECASE),
         re.compile(r"you\s+received\s+this\s+email\s+because\s+you\s+were\s+(?:invited|subscribed|added)", re.IGNORECASE),
@@ -691,17 +737,34 @@ _CONTEXT_PATTERNS = [
         re.compile(r"\bstar\.watch\b", re.IGNORECASE),
         re.compile(r"\bstar\s+submission\b", re.IGNORECASE),
     ]),
+    # Membership (context fallback)
+    ("Membership", [
+        re.compile(r"\bmembership\s+(inquiry|application|question|request|information)\b", re.IGNORECASE),
+        re.compile(r"\bindividual\s+contributor\s+information\b", re.IGNORECASE),
+    ]),
+    # Skilljar — CSA's LMS; wins before Tooling for training/course issues
+    ("Skilljar", [
+        re.compile(r"\bskilljar\b", re.IGNORECASE),
+        re.compile(r"\bintro(?:duction)?\s+to\s+csa\s+tools?\b", re.IGNORECASE),
+        re.compile(r"\bcsa\s+tools?\s+(course|training|module|lesson|platform)\b", re.IGNORECASE),
+        re.compile(r"\bcsa\s+(lms|learning\s+platform|training\s+platform)\b", re.IGNORECASE),
+    ]),
+    # RIT — CSA's Resource and Information Tracker; wins before generic Tooling
+    ("RIT", [
+        re.compile(r"\bRIT\b"),
+        re.compile(r"\bresource\s+and\s+information\s+tracker\b", re.IGNORECASE),
+    ]),
     # Tooling BEFORE Infrastructure — so "tableau MCP server" hits Tooling, not Infra
     ("Tooling", [
         re.compile(r"\b(github|gitlab|jira|confluence|slack|zoom|teams|zendesk|airtable|zapier|salesforce|pardot|hubspot|mailgun|surveymonkey)\b", re.IGNORECASE),
         re.compile(r"\b(chatgpt|claude|copilot|anthropic|ai\s+license|ai\s+vendor|qms\s+chat\s*bot)\b", re.IGNORECASE),
         re.compile(r"(consolidat|migrat|decommission|integrat)\w*\s+.{0,30}(tool|platform|service|account|license|subscription)", re.IGNORECASE),
         re.compile(r"\bmcp\s+server\b", re.IGNORECASE),
-        re.compile(r"\bRIT\b"),
     ]),
     # Infrastructure — servers, DNS, cloud providers, backups, firmware
     ("Infrastructure", [
-        re.compile(r"\b(server|dns|domain|ssl|tls|firewall|vpn|router|firmware)\b", re.IGNORECASE),
+        re.compile(r"\b(server|dns|ssl|tls|firewall|vpn|router|firmware)\b", re.IGNORECASE),
+        re.compile(r"\bdomain\b(?!\s*\d)", re.IGNORECASE),  # DNS domain, not course "Domain 8"
         re.compile(r"\b(cloudflare|digital.?ocean|aws|azure|gcp)\b", re.IGNORECASE),
         re.compile(r"(dmarc|dkim|spf|mx\s+record|email\s+(?:config|setting|routing|deliverability))", re.IGNORECASE),
         re.compile(r"(deploy|hosting|uptime|outage|downtime|monitoring|backup)\b", re.IGNORECASE),
@@ -771,7 +834,7 @@ def detect_category(title: str, description: str) -> str:
             if pat.search(title):
                 if category in VALID_CATEGORIES:
                     return category
-                logger.warning("detect_category matched unknown category %r — falling through", category)
+                # Category was removed from VALID_CATEGORIES intentionally — fall through
                 break
 
     # Pass 2: check title + description for context/subject
@@ -781,10 +844,10 @@ def detect_category(title: str, description: str) -> str:
             if pat.search(text):
                 if category in VALID_CATEGORIES:
                     return category
-                logger.warning("detect_category matched unknown category %r — falling through", category)
+                # Category was removed from VALID_CATEGORIES intentionally — fall through
                 break
 
-    return "General Inquiry"
+    return "Needs Triage"
 
 
 def _title_from_url(title: str) -> str:
@@ -1693,7 +1756,7 @@ def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
         _star_m = _star_submission_re.match(cleaned_title)
         if _star_m:
             domain = _star_m.group(2).rstrip(".")
-            suggested = f"[STAR/Registry] New STAR Submission — {domain}"
+            suggested = f"[Needs Triage] New STAR Submission — {domain}"
             return {
                 "suggested_title": suggested,
                 "status": "Suggestion",
