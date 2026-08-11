@@ -532,6 +532,9 @@ VALID_CATEGORIES = {
     "RIT":                    "CSA's Resource and Information Tracker — access, content, or technical issues",
     "Tooling":                "SaaS platform management, license requests, tool procurement",
     "Working Group":          "WG IT support — calendar, access, page setup, member provisioning",
+    # ── IT Ops core work (continued) ────────────────────────────────────────
+    "Documentation":          "IT Ops internal docs — SOPs, work instructions, runbooks, KB articles, diagrams",
+    "Networking":             "Physical office network — Unifi, wireless, switches, topology diagrams, Bellingham",
     # ── IT Ops managed platforms ─────────────────────────────────────────────
     "Skilljar":               "CSA's LMS — course access, enrollment, completion, training issues",
     # ── Routing labels (not IT Ops work — route to appropriate team) ─────────
@@ -541,6 +544,19 @@ VALID_CATEGORIES = {
     # ── Administrative / routing ─────────────────────────────────────────────
     "Automated Notification": "System-generated alerts, vendor notifications, workflow emails",
     "Needs Triage":           "Uncategorized or misdirected — review and route to the right team",
+}
+
+# Alternate/legacy prefix names that map to canonical VALID_CATEGORIES keys.
+# Used in _suggest_title_raw() so tickets like [Reporting] get recategorized
+# as [Data/Reporting] rather than silently skipped.
+CATEGORY_ALIASES: dict[str, str] = {
+    "Reporting":            "Data/Reporting",
+    "Report":               "Data/Reporting",
+    "Notification":         "Automated Notification",
+    "General Inquiry":      "Needs Triage",
+    "Onboarding":           "Onboarding/Offboarding",
+    "Offboarding":          "Onboarding/Offboarding",
+    "IT Support":           "Needs Triage",
 }
 
 # ---------------------------------------------------------------------------
@@ -572,8 +588,9 @@ _ACTION_PATTERNS = [
         re.compile(r"\bemployee\s+status\s+change\b", re.IGNORECASE),
         # Google Workspace / shared drive invitations
         re.compile(r"\byou(?:'ve| have) been added\b", re.IGNORECASE),
-        # Vendor "Action Required" product emails (Salesforce, Azure, etc.)
-        re.compile(r"^Action\s+Required\s*:", re.IGNORECASE),
+        # Vendor "Action Required / Action Advised" product emails
+        re.compile(r"^(?:Action\s+Required|Action\s+Advised)\s*:", re.IGNORECASE),
+        re.compile(r"^\[Action\s+(?:Required|Advised)\]", re.IGNORECASE),
         # Generic vendor product/service notice subject lines
         re.compile(r"^(?:Important\s+)?(?:Information|Notice|Update)\s+Regarding\b", re.IGNORECASE),
     ]),
@@ -586,6 +603,14 @@ _ACTION_PATTERNS = [
         re.compile(r"\bvalid.?ai.?ted\b", re.IGNORECASE),
         re.compile(r"\b(aicm|ai\s+controls\s+matrix)\b", re.IGNORECASE),
     ]),
+    # Documentation (high-confidence IT Ops doc patterns — placed early so SOP/KB titles beat
+    # Onboarding, Data/Reporting, Configuration, etc. when prefix is stripped)
+    ("Documentation", [
+        re.compile(r"\b(sop|standard\s+operating\s+procedure|work\s+instruction)\b", re.IGNORECASE),
+        re.compile(r"\b(runbook|playbook|kb\s+article|quick\s+reference\s+card)\b", re.IGNORECASE),
+        re.compile(r"\bchange\s+management\s+process\b", re.IGNORECASE),
+        re.compile(r"\b(renew|refresh|update|verify|upload|create|draft)\b.{0,30}\b(zendesk\s+article|kb\s+article|work\s+instruction|sop)\b", re.IGNORECASE),
+    ]),
     # Onboarding/Offboarding — new hire provisioning or departing employee deprovisioning
     ("Onboarding/Offboarding", [
         re.compile(r"\b(onboard|offboard)\w*\b", re.IGNORECASE),
@@ -594,6 +619,9 @@ _ACTION_PATTERNS = [
         re.compile(r"\b(terminat\w*|deprovision\w*|deactivat\w*)\s+.{0,20}(account|access|user|license)\b", re.IGNORECASE),
         re.compile(r"\b(delete|remov\w*)\s+.{0,30}(user\s+accounts?|m365\s+accounts?|microsoft\s*365?\s+.{0,10}accounts?|google\s+accounts?)\b", re.IGNORECASE),
         re.compile(r"\b(employee|staff|user)\s+(departure|leaving|termination|exit|separation)\b", re.IGNORECASE),
+        re.compile(r"\b(remov\w*|eliminat\w*)\s+.{0,20}(former|ex.)\s+.{0,15}employees?\b", re.IGNORECASE),
+        re.compile(r"\b(remov\w*|eliminat\w*)\s+.{0,20}(former|ex.)\s+.{0,20}(csa\s+)?employees?\s+.{0,20}(from\s+.{0,20}(page|list|directory|site))\b", re.IGNORECASE),
+        re.compile(r"\b(remov\w*|eliminat\w*)\s+.{0,20}employees?\s+.{0,20}from\s+.{0,20}(staff\s+page|directory)\b", re.IGNORECASE),
         re.compile(r"\b(last\s+day|first\s+day|start\s+date)\b.{0,30}(account|access|setup|email)\b", re.IGNORECASE),
     ]),
     # Skilljar — CSA's LMS; must be before Billing and Certification so "CSA Tools course access" → Skilljar
@@ -624,6 +652,26 @@ _ACTION_PATTERNS = [
         re.compile(r"\b(join|apply\s+for)\s+.{0,20}(csa|membership)\b", re.IGNORECASE),
         re.compile(r"\bindividual\s+contributor\s+information\b", re.IGNORECASE),
     ]),
+    # Networking (high-confidence early patterns — Unifi/Ubiquiti keyword placed before Access Request
+    # so "add alias to Unifi device on office network" → Networking, not Access Request)
+    ("Networking", [
+        re.compile(r"\b(unifi|ubiquiti)\b", re.IGNORECASE),
+        re.compile(r"\b(office\s+network|network\s+closet|bellingham\s+office)\b", re.IGNORECASE),
+    ]),
+    # Security (high-confidence early patterns — placed before Access Request so stale-token/credential
+    # rotation beats the OAuth pattern in Access Request)
+    ("Security", [
+        re.compile(r"\bstale\b.{0,20}\b(token|key|secret|credential|oauth)\b", re.IGNORECASE),
+        re.compile(r"\b(rotate|rotation|rotated)\s+.{0,20}(key|token|secret|credential)\b", re.IGNORECASE),
+        re.compile(r"\b(credential|secret)\s+(rotation|rotat|expir)\b", re.IGNORECASE),
+        re.compile(r"\bclean\w*\s+.{0,15}(stale|old|unused)\s+.{0,10}(token|key|secret|credential)\b", re.IGNORECASE),
+    ]),
+    # Account Issue (high-confidence early patterns — placed before Access Request so "account locked"
+    # beats Access Request's login/oauth pattern)
+    ("Account Issue", [
+        re.compile(r"\b(account|profile|user)\s+.{0,20}(locked|blocked|suspended|disabled)\b", re.IGNORECASE),
+        re.compile(r"\blocked\s+out\b", re.IGNORECASE),
+    ]),
     # RIT — specific CSA tool; must come before Access Request so "RIT access" → RIT, not Access Request
     ("RIT", [
         re.compile(r"\bRIT\b"),
@@ -632,10 +680,10 @@ _ACTION_PATTERNS = [
     # Access Request — BEFORE Tooling so "Mailgun access" = Access, not Tooling
     ("Access Request", [
         re.compile(r"(add|remove|grant|revoke|give|need)\s+.{0,30}(access|permission|role|admin|editor|viewer|member)", re.IGNORECASE),
-        re.compile(r"\baccess\s+(to|for|on|request)\b", re.IGNORECASE),
-        re.compile(r"(add|invite|remove)\s+.{0,20}(user|member|team|group)", re.IGNORECASE),
+        re.compile(r"\baccess\s+(to|for|on|request|needed|needed|required)\b", re.IGNORECASE),
+        re.compile(r"(add|invite|remove)\s+.{0,20}(user|member|team|group)(?!\s+device)", re.IGNORECASE),
         re.compile(r"(added?\s+to|removed?\s+from|join)\s+.{0,20}(team|group|channel|org|alias)", re.IGNORECASE),
-        re.compile(r"\b(add\w*|be\s+added)\b.{0,40}\balias\b", re.IGNORECASE),
+        re.compile(r"\b(add\w*|be\s+added)\b.{0,40}\balias\b(?!.{0,30}(device|endpoint|network|switch|router|unifi))", re.IGNORECASE),
         re.compile(r"\b(sso|oauth|login|sign.?in|password|mfa|2fa)\b", re.IGNORECASE),
         re.compile(r"verify\s+.{0,30}\b(on|in|has)\s+.{0,15}(account|team|access)", re.IGNORECASE),
         re.compile(r"\b(role|privilege|permission)\s+(structure|setup|implement|define|establish)\b", re.IGNORECASE),
@@ -643,17 +691,54 @@ _ACTION_PATTERNS = [
         re.compile(r"\b(audit|review)\s+.{0,15}access\b", re.IGNORECASE),
         re.compile(r"\bpermissions?\s+(to|for)\s+(edit|view|creat|delet|updat|manage|modify)\b", re.IGNORECASE),
         re.compile(r"\b(change|transfer)\s+.{0,40}(owner|ownership)\b", re.IGNORECASE),
+        re.compile(r"\bprovide\b.{0,30}\bwith\b.{0,20}(access|permissions?|admin|editor|viewer)\b", re.IGNORECASE),
+    ]),
+    # Documentation — IT Ops internal docs BEFORE Data/Reporting and Configuration so SOP/KB titles win
+    ("Documentation", [
+        re.compile(r"\b(sop|standard\s+operating\s+procedure|work\s+instruction)\b", re.IGNORECASE),
+        re.compile(r"\b(runbook|playbook|knowledge\s+base|kb\s+article|quick\s+reference\s+card)\b", re.IGNORECASE),
+        re.compile(r"\bchange\s+management\s+process\b", re.IGNORECASE),
+        re.compile(r"\bshare\s+knowledge\b", re.IGNORECASE),
+        re.compile(r"\b(renew|refresh|update|verify|upload|create|draft)\b.{0,30}\b(zendesk\s+article|kb\s+article|work\s+instruction|sop)\b", re.IGNORECASE),
+        re.compile(r"\b(document|documentation|wiki|guide|readme|whitepaper|white\s+paper|publication|glossary)\b", re.IGNORECASE),
+        # Content errors in published docs / glossary entries
+        re.compile(r"\b(typo|error|mistake|correction|not\s+in\s+agreement|header\s+acronym)\b.{0,40}\b(doc|page|glossary|article|entry|definition)\b", re.IGNORECASE),
+        re.compile(r"\b(copies|archived?\s+cop|archived?\s+version).{0,30}(whitepaper|paper|document|publication)\b", re.IGNORECASE),
+        re.compile(r"(publish|publishing)\s+.{0,20}(doc|page|article|paper|policy|procedure|process|content)", re.IGNORECASE),
+        re.compile(r"\b(policy|procedure|guideline|standard)\s+(document|for|on|about|creation|review|update|ensure|consistency)", re.IGNORECASE),
+        re.compile(r"(create|update|review|ensure)\s+.{0,15}(policy|procedure|guideline)", re.IGNORECASE),
+        re.compile(r"\bcms\b.{0,40}(?:content|page|site|publish|article|template|creat|manag)|(?:content|page|publish|site|article|template|manag).{0,40}\bcms\b", re.IGNORECASE),
+        re.compile(r"(content\s+management|managing\s+.{0,15}page)", re.IGNORECASE),
+        re.compile(r"(acknowledge?ments?|privacy\s+policy|topic\s+filter)\b", re.IGNORECASE),
+        re.compile(r"\b(guidance|guideline)\s+(for|on|about)", re.IGNORECASE),
+        re.compile(r"\buse\s+guidance\b", re.IGNORECASE),
+    ]),
+    # Account Issue (high-confidence action patterns — placed here so locked-out beats Tooling in Pass 2)
+    ("Account Issue", [
+        re.compile(r"\blocked\s+out\b", re.IGNORECASE),
+        re.compile(r"\b(account|profile|user)\s+.{0,20}(locked|blocked|suspended|disabled)\b", re.IGNORECASE),
     ]),
     # Data/Reporting — "list of users", "run a report", data exports
     ("Data/Reporting", [
+        re.compile(r"\bsla.{0,20}(report|graph|chart|dashboard|email\s+report)\b", re.IGNORECASE),
         re.compile(r"(dashboard|analytics|metric|data\s+(?:export|import|extract|query|migration))", re.IGNORECASE),
         re.compile(r"(run\s+a?\s*report|generate\s+report|pull\s+report|report\s+of\b)", re.IGNORECASE),
         re.compile(r"\blist\s+of\s+.{0,20}(user|member|account|email|active|staff)", re.IGNORECASE),
-        re.compile(r"(data\s+request|data\s+pull|prepkit\s+download)", re.IGNORECASE),
+        re.compile(r"(data\s+request|data\s+pull|prepkit\s+download|data\s+fix\s+request)", re.IGNORECASE),
+        re.compile(r"\bsales\s+report\b", re.IGNORECASE),
+        re.compile(r"\bdownload\s+count\b", re.IGNORECASE),
         # Lead/opt-in requests from survey reports
         re.compile(r"\b(opt.?in\s+leads?|lead\s+list|lead\s+pull|survey\s+leads?|report\s+leads?)\b", re.IGNORECASE),
         re.compile(r"\bleads?\s+for\s+.{0,40}(survey|report|program|campaign)\b", re.IGNORECASE),
         re.compile(r"\b(3rd|third).?party.{0,20}leads?\b", re.IGNORECASE),
+    ]),
+    # Networking — physical office network (before Infrastructure)
+    ("Networking", [
+        re.compile(r"\b(unifi|ubiquiti)\b", re.IGNORECASE),
+        re.compile(r"\b(wifi|wireless\s+equipment|ethernet\s+switch|vlan|wlan|ssid)\b", re.IGNORECASE),
+        re.compile(r"\b(network\s+closet|office\s+network|bellingham\s+office)\b", re.IGNORECASE),
+        re.compile(r"\b(network\s+topology|cross.?connect|uplink\s+equipment|logical\s+topology)\b", re.IGNORECASE),
+        re.compile(r"\b(network\s+(diagram|inventory|map))\b", re.IGNORECASE),
     ]),
     # Infrastructure (action) — subdomain/domain removal, decommission of hosted resources
     ("Infrastructure", [
@@ -669,11 +754,15 @@ _ACTION_PATTERNS = [
     ]),
     # Automation — webhook/API/script automation; BEFORE Configuration to win on "automate workflow"
     ("Automation", [
-        re.compile(r"\b(zapier|make\.com|integromat|n8n|automate\.io)\b", re.IGNORECASE),
+        re.compile(r"\b(zapier|make\.com|integromat|n8n|automate\.io|activecampaign)\b", re.IGNORECASE),
         re.compile(r"\b(webhook|api\s+integration|api\s+automation|api\s+connect)\b", re.IGNORECASE),
         re.compile(r"\bautomat\w+\s+.{0,30}(workflow|process|task|email|report|trigger)\b", re.IGNORECASE),
         re.compile(r"\b(cron\s+job|scheduled\s+job|batch\s+job|script\s+run)\b", re.IGNORECASE),
         re.compile(r"\b(rpa|robotic\s+process\s+automation)\b", re.IGNORECASE),
+        re.compile(r"\bmcp\s+(server|connector|integration|tool)\b", re.IGNORECASE),
+        re.compile(r"\b(integration|connector)\s+.{0,30}(platform|service|tool|system|workflow)\b", re.IGNORECASE),
+        re.compile(r"\binvestigat\w+\s+.{0,30}(integration|connector|webhook|api|automation)\b", re.IGNORECASE),
+        re.compile(r"\b(brighttalk|activecampaign)\s+.{0,30}(integration|connector|sync|connect)\b", re.IGNORECASE),
     ]),
     # Configuration — BEFORE Documentation so "SLA Policy" = Config, not Documentation
     ("Configuration", [
@@ -689,33 +778,27 @@ _ACTION_PATTERNS = [
         re.compile(r"\badd\s+.{0,15}\bto\s+.{0,15}(email|notification|template|sign.?up)", re.IGNORECASE),
         re.compile(r"\bemail\s+forwarding\b", re.IGNORECASE),
         re.compile(r"\b(forward|redirect)\s+.{0,20}(email|mail|inbox)\b", re.IGNORECASE),
-    ]),
-    # Documentation — policy, publishing, CMS, working group pages, acknowledgements
-    ("Documentation", [
-        re.compile(r"\b(document|documentation|wiki|guide|readme|runbook|playbook|knowledge\s+base|kb|whitepaper|white\s+paper|publication|glossary)\b", re.IGNORECASE),
-        # Content errors in published docs / glossary entries
-        re.compile(r"\b(typo|error|mistake|correction|not\s+in\s+agreement|header\s+acronym)\b.{0,40}\b(doc|page|glossary|article|entry|definition)\b", re.IGNORECASE),
-        re.compile(r"\b(copies|archived?\s+cop|archived?\s+version).{0,30}(whitepaper|paper|document|publication)\b", re.IGNORECASE),
-        re.compile(r"(publish|publishing)\s+.{0,20}(doc|page|article|paper|policy|procedure|process|content)", re.IGNORECASE),
-        re.compile(r"\b(policy|procedure|guideline|standard)\s+(document|for|on|about|creation|review|update|ensure|consistency)", re.IGNORECASE),
-        re.compile(r"(create|update|review|ensure)\s+.{0,15}(policy|procedure|guideline)", re.IGNORECASE),
-        re.compile(r"\bcms\b.{0,40}(?:content|page|site|publish|article|template|creat|manag)|(?:content|page|publish|site|article|template|manag).{0,40}\bcms\b", re.IGNORECASE),
-        re.compile(r"(content\s+management|working\s+group\s+page|managing\s+.{0,15}page)", re.IGNORECASE),
-        re.compile(r"(acknowledge?ments?|privacy\s+policy|topic\s+filter)\b", re.IGNORECASE),
-        re.compile(r"\b(guidance|guideline)\s+(for|on|about)", re.IGNORECASE),
-        re.compile(r"\buse\s+guidance\b", re.IGNORECASE),
+        re.compile(r"\b(email\s+group|email\s+alias|google\s+group|mailing\s+list|distribution\s+list)\b", re.IGNORECASE),
+        re.compile(r"\bcreate\s+.{0,20}(alias|group)\b", re.IGNORECASE),
+        re.compile(r"\b(new\s+ou|organizational\s+unit|create\s+ou)\b", re.IGNORECASE),
+        re.compile(r"\bemail\s+address\s+(issue|problem|not\s+work|broken|error|missing|wrong|invalid)\b", re.IGNORECASE),
+        re.compile(r"\b(issue|problem|error)\s+with\s+.{0,20}email\s+address\b", re.IGNORECASE),
     ]),
     # Security — tighten: require security-specific context, not just the word "security"
     ("Security", [
         re.compile(r"\b(vulnerability|incident|breach|phishing|malware|ransomware|threat)\b", re.IGNORECASE),
         re.compile(r"\b(security\.txt|pen\s*test|penetration)\b", re.IGNORECASE),
         re.compile(r"\b(pii|data\s+(?:leak|exposure|privacy|protection|flow|governance))\b", re.IGNORECASE),
-        re.compile(r"\b(stale\s+token|rotate\s+key|secret\s+rotation|credential\s+rotation)\b", re.IGNORECASE),
+        re.compile(r"\bstale\b.{0,20}\b(token|key|secret|credential)\b", re.IGNORECASE),
+        re.compile(r"\b(rotate\s+key|secret\s+rotation|credential\s+rotation)\b", re.IGNORECASE),
         re.compile(r"\bsecurity\s+(audit|review|scan|assessment|incident|alert|patch)\b", re.IGNORECASE),
         re.compile(r"\b(decommission\w*)\s+.{0,30}(pii|data|privacy|governance)", re.IGNORECASE),
         re.compile(r"clean\w*\s+.{0,15}(stale|old|unused)\s+.{0,10}(token|key|secret|credential)", re.IGNORECASE),
         re.compile(r"\b(dpo|data\s+subject\s+request|data\s+deletion|data\s+removal|right\s+to\s+erasure|right\s+to\s+be\s+forgotten)\b", re.IGNORECASE),
         re.compile(r"\b(gdpr|ccpa)\s+.{0,30}(request|deletion|removal|compli)", re.IGNORECASE),
+        re.compile(r"\bcve-\d{4}-\d+\b", re.IGNORECASE),
+        re.compile(r"\b(bot\s+traffic|bot\s+attack|web\s+scraping|ddos|dos\s+attack)\b", re.IGNORECASE),
+        re.compile(r"\b(2sv|two.?step\s+verification|two.?factor)\b.{0,30}(enforce|require|secure|enable)\b", re.IGNORECASE),
     ]),
 ]
 
@@ -758,6 +841,7 @@ _CONTEXT_PATTERNS = [
     ("Tooling", [
         re.compile(r"\b(github|gitlab|jira|confluence|slack|zoom|teams|zendesk|airtable|zapier|salesforce|pardot|hubspot|mailgun|surveymonkey)\b", re.IGNORECASE),
         re.compile(r"\b(chatgpt|claude|copilot|anthropic|ai\s+license|ai\s+vendor|qms\s+chat\s*bot)\b", re.IGNORECASE),
+        re.compile(r"\b(adobe|acrobat|photoshop|illustrator|indesign|creative\s+cloud)\b", re.IGNORECASE),
         re.compile(r"(consolidat|migrat|decommission|integrat)\w*\s+.{0,30}(tool|platform|service|account|license|subscription)", re.IGNORECASE),
         re.compile(r"\bmcp\s+server\b", re.IGNORECASE),
     ]),
@@ -771,6 +855,9 @@ _CONTEXT_PATTERNS = [
         re.compile(r"(indexed|crawl|seo)\s+.{0,20}(site|page|url)", re.IGNORECASE),
         re.compile(r"\b(local\s+file|old\s+(?:machine|computer|laptop)|microsoft\s+machine)\b", re.IGNORECASE),
         re.compile(r"\b(malware|severity\s+alert)\b", re.IGNORECASE),
+        re.compile(r"\b(certcentral|digicert)\b", re.IGNORECASE),
+        re.compile(r"\bssl\b.{0,30}\b(renew|renewal|expir|purchas)\b", re.IGNORECASE),
+        re.compile(r"\b(certificate|cert)\b.{0,30}\b(renew|renewal|expir|purchas)\b", re.IGNORECASE),
     ]),
     # Billing (fallback if not caught by title)
     ("Billing", [
@@ -791,6 +878,15 @@ _CONTEXT_PATTERNS = [
         re.compile(r"(account|profile|user)\s+.{0,20}(expired?|locked|blocked|suspended|disabled|inactive|missing|wrong|invalid)", re.IGNORECASE),
         re.compile(r"(expired?|expir(?:ing|ation))\s+.{0,20}(account|license|subscription|membership|certificate)", re.IGNORECASE),
         re.compile(r"(cannot|can'?t|unable)\s+.{0,20}(log\s*in|sign\s*in|access|authenticate)", re.IGNORECASE),
+        re.compile(r"\blocked\s+out\b", re.IGNORECASE),
+        re.compile(r"\b(missing|lost)\s+.{0,15}(security\s+key|2fa|mfa|authenticator)\b", re.IGNORECASE),
+    ]),
+    # Networking (context fallback)
+    ("Networking", [
+        re.compile(r"\b(unifi|ubiquiti)\b", re.IGNORECASE),
+        re.compile(r"\b(network\s+closet|office\s+network|bellingham)\b", re.IGNORECASE),
+        re.compile(r"\b(topology|cross.?connect|uplink)\b", re.IGNORECASE),
+        re.compile(r"\b(network\s+(diagram|inventory|equipment|map))\b", re.IGNORECASE),
     ]),
     # Data/Reporting (fallback)
     ("Data/Reporting", [
@@ -1737,6 +1833,17 @@ def _suggest_title_raw(ticket: dict, comments: list[dict]) -> dict:
                 "suggested_title": corrected,
                 "status": "Suggestion",
                 "reason": f"Recategorized from [{existing_category}] to [{correct_category}]",
+            }
+        # Check for a known alias (e.g. [Reporting] → Data/Reporting)
+        canonical = CATEGORY_ALIASES.get(existing_category)
+        if canonical:
+            title_body = current_title[existing_prefix_match.end():]
+            correct_category = detect_category(title_body, description)
+            corrected = f"[{correct_category}] {title_body}"
+            return {
+                "suggested_title": corrected,
+                "status": "Suggestion",
+                "reason": f"Normalized alias [{existing_category}] → [{correct_category}]",
             }
         # Unknown/custom prefix (e.g. [OPS-PROJ | P## | T#/#]) — always skip
         return {
