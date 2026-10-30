@@ -39,6 +39,28 @@ pip install -r requirements.txt
 python ticket_title_suggester.py
 ```
 
+## Changelog
+
+### 2026-10-30
+- **Security**: `Vulnerabilities` (plural) now triggers Security category; token/credential expiry pattern added (e.g. "Authorization Token expiring in 60 days")
+- **Automation**: "Active Campaign" (two words) now matches alongside `activecampaign`; recurring tasks/scripts pattern added; `[Zoom Events / Active Campaign Integration]` correctly routed
+- **Access Request**: `Removing` (not just `remove`) now matches; `seat` added to access-type words (e.g. "Grant full Zendesk seat"); tool-name + "access" pattern added for Sharepoint, GitHub, Drive, etc.
+- **Documentation**: "Offboarding, Add X" pattern added so `[Documentation] Offboarding, Add Check for...` tickets are not wrongly recategorized; `handbook` added as keyword
+- **Tooling**: Zoho, Sharepoint, Firecrawl added to context patterns
+- **CATEGORY_ALIASES**: `[Permissions]` → Access Request; `[Action Required]` → Automated Notification; `[Offboarding]` / `[Onboarding]` → Onboarding/Offboarding
+
+### 2026-10-29
+- **Pattern ordering refactor**: Added early high-confidence mini-blocks (before Access Request) for Security (stale token/credential rotation), Account Issue (account locked), and Networking (Unifi/Ubiquiti) to prevent Access Request's broad oauth/login/alias patterns from stealing those tickets
+- **Documentation**: Two-stage block — specific SOP/KB patterns placed before Onboarding so `[Documentation] Renew Zendesk Article` stays Documentation; broader patterns placed before Data/Reporting and Configuration
+- **Security**: Broadened stale token pattern to catch "Stale OAuth Token" (multi-word); added CVE, bot traffic, 2SV patterns
+- **Onboarding/Offboarding**: Added "remove former/ex employees from staff page" with plural fix; added `delete Microsoft365 accounts` pattern
+- **Automation**: Added ActiveCampaign, MCP connector, BrightTalk+AC integration, investigation+integration patterns
+- **Tooling**: Added Adobe/Acrobat to context patterns
+- **Infrastructure**: Added CertCentral/DigiCert, SSL/cert renewal patterns
+- **Configuration**: Added email address issue patterns; email group/alias patterns
+- **Data/Reporting**: Added SLA report/graph pattern
+- **CATEGORY_ALIASES**: Added `[Reporting]` → Data/Reporting and other legacy prefixes so they trigger recategorization instead of silent skip
+
 ## Configuration
 
 | Env Variable | Default | Description |
