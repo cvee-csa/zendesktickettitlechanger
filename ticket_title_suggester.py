@@ -553,9 +553,11 @@ CATEGORY_ALIASES: dict[str, str] = {
     "Reporting":            "Data/Reporting",
     "Report":               "Data/Reporting",
     "Notification":         "Automated Notification",
+    "Action Required":      "Automated Notification",
     "General Inquiry":      "Needs Triage",
     "Onboarding":           "Onboarding/Offboarding",
     "Offboarding":          "Onboarding/Offboarding",
+    "Permissions":          "Access Request",
     "IT Support":           "Needs Triage",
 }
 
@@ -610,6 +612,9 @@ _ACTION_PATTERNS = [
         re.compile(r"\b(runbook|playbook|kb\s+article|quick\s+reference\s+card)\b", re.IGNORECASE),
         re.compile(r"\bchange\s+management\s+process\b", re.IGNORECASE),
         re.compile(r"\b(renew|refresh|update|verify|upload|create|draft)\b.{0,30}\b(zendesk\s+article|kb\s+article|work\s+instruction|sop)\b", re.IGNORECASE),
+        # Process documentation pattern: "Offboarding, Add X" / "Onboarding, Check Y" — doc tasks that
+        # describe WHICH process is being documented, not that this IS an Onboarding ticket
+        re.compile(r"\b(onboarding|offboarding|access\s+request|configuration|security|tooling|networking),\s*(add|update|check|create|remove|review|verify)\b", re.IGNORECASE),
     ]),
     # Onboarding/Offboarding — new hire provisioning or departing employee deprovisioning
     ("Onboarding/Offboarding", [
@@ -679,9 +684,10 @@ _ACTION_PATTERNS = [
     ]),
     # Access Request — BEFORE Tooling so "Mailgun access" = Access, not Tooling
     ("Access Request", [
-        re.compile(r"(add|remove|grant|revoke|give|need)\s+.{0,30}(access|permission|role|admin|editor|viewer|member)", re.IGNORECASE),
-        re.compile(r"\baccess\s+(to|for|on|request|needed|needed|required)\b", re.IGNORECASE),
-        re.compile(r"(add|invite|remove)\s+.{0,20}(user|member|team|group)(?!\s+device)", re.IGNORECASE),
+        re.compile(r"(add|remov\w*|grant|revok\w*|give|need)\s+.{0,30}(access|permission|role|admin|editor|viewer|member|seat)", re.IGNORECASE),
+        re.compile(r"\baccess\s+(to|for|on|request|needed|required)\b", re.IGNORECASE),
+        re.compile(r"\b(sharepoint|confluence|github|airtable|salesforce|slack|drive|folder|base)\s+access\b", re.IGNORECASE),
+        re.compile(r"(add|invite|remov\w*)\s+.{0,20}(user|member|team|group)(?!\s+device)", re.IGNORECASE),
         re.compile(r"(added?\s+to|removed?\s+from|join)\s+.{0,20}(team|group|channel|org|alias)", re.IGNORECASE),
         re.compile(r"\b(add\w*|be\s+added)\b.{0,40}\balias\b(?!.{0,30}(device|endpoint|network|switch|router|unifi))", re.IGNORECASE),
         re.compile(r"\b(sso|oauth|login|sign.?in|password|mfa|2fa)\b", re.IGNORECASE),
@@ -700,7 +706,7 @@ _ACTION_PATTERNS = [
         re.compile(r"\bchange\s+management\s+process\b", re.IGNORECASE),
         re.compile(r"\bshare\s+knowledge\b", re.IGNORECASE),
         re.compile(r"\b(renew|refresh|update|verify|upload|create|draft)\b.{0,30}\b(zendesk\s+article|kb\s+article|work\s+instruction|sop)\b", re.IGNORECASE),
-        re.compile(r"\b(document|documentation|wiki|guide|readme|whitepaper|white\s+paper|publication|glossary)\b", re.IGNORECASE),
+        re.compile(r"\b(document|documentation|wiki|guide|readme|whitepaper|white\s+paper|publication|glossary|handbook|slides?\s+for\s+\w+)\b", re.IGNORECASE),
         # Content errors in published docs / glossary entries
         re.compile(r"\b(typo|error|mistake|correction|not\s+in\s+agreement|header\s+acronym)\b.{0,40}\b(doc|page|glossary|article|entry|definition)\b", re.IGNORECASE),
         re.compile(r"\b(copies|archived?\s+cop|archived?\s+version).{0,30}(whitepaper|paper|document|publication)\b", re.IGNORECASE),
@@ -754,11 +760,12 @@ _ACTION_PATTERNS = [
     ]),
     # Automation — webhook/API/script automation; BEFORE Configuration to win on "automate workflow"
     ("Automation", [
-        re.compile(r"\b(zapier|make\.com|integromat|n8n|automate\.io|activecampaign)\b", re.IGNORECASE),
+        re.compile(r"\b(zapier|make\.com|integromat|n8n|automate\.io|activecampaign|active\s+campaign)\b", re.IGNORECASE),
         re.compile(r"\b(webhook|api\s+integration|api\s+automation|api\s+connect)\b", re.IGNORECASE),
         re.compile(r"\bautomat\w+\s+.{0,30}(workflow|process|task|email|report|trigger)\b", re.IGNORECASE),
         re.compile(r"\b(cron\s+job|scheduled\s+job|batch\s+job|script\s+run)\b", re.IGNORECASE),
         re.compile(r"\b(rpa|robotic\s+process\s+automation)\b", re.IGNORECASE),
+        re.compile(r"\brecurring\s+.{0,20}(tasks?|jobs?|scripts?|processes?|reminders?)\b", re.IGNORECASE),
         re.compile(r"\bmcp\s+(server|connector|integration|tool)\b", re.IGNORECASE),
         re.compile(r"\b(integration|connector)\s+.{0,30}(platform|service|tool|system|workflow)\b", re.IGNORECASE),
         re.compile(r"\binvestigat\w+\s+.{0,30}(integration|connector|webhook|api|automation)\b", re.IGNORECASE),
@@ -766,7 +773,8 @@ _ACTION_PATTERNS = [
     ]),
     # Configuration — BEFORE Documentation so "SLA Policy" = Config, not Documentation
     ("Configuration", [
-        re.compile(r"(config|setting|setup|enable|disable|toggle|update|modify|change)\s+.{0,30}(setting|config|option|feature|flag|policy|rule)", re.IGNORECASE),
+        re.compile(r"(config|setting|setup|enable|disable|toggle|update|modify|change)\s+.{0,30}(setting|config|option|feature|flag|policy|rule|duration|session)", re.IGNORECASE),
+        re.compile(r"\benable\s+.{0,30}(desktop|mobile)\s+.{0,30}(session|slack|teams|zoom)\b", re.IGNORECASE),
         re.compile(r"\b(redirect|rewrite|iframe|embed|sitemap|robots\.txt)\b", re.IGNORECASE),
         re.compile(r"(workflow|trigger|schedule|sla\s+polic)", re.IGNORECASE),
         re.compile(r"(set\s*up|creat|build|configur)\w*\s+.{0,30}(form|page|template|landing|portal|widget)", re.IGNORECASE),
@@ -786,7 +794,9 @@ _ACTION_PATTERNS = [
     ]),
     # Security — tighten: require security-specific context, not just the word "security"
     ("Security", [
-        re.compile(r"\b(vulnerability|incident|breach|phishing|malware|ransomware|threat)\b", re.IGNORECASE),
+        re.compile(r"\bvulnerabilit\w+\b", re.IGNORECASE),  # vulnerabilities, vulnerability
+        re.compile(r"\b(incident|breach|phishing|malware|ransomware|threat)\b", re.IGNORECASE),
+        re.compile(r"\b(token|key|secret|credential)\b.{0,30}\b(expir\w*|comprom\w*|stolen|unauthoriz\w*)\b", re.IGNORECASE),
         re.compile(r"\b(security\.txt|pen\s*test|penetration)\b", re.IGNORECASE),
         re.compile(r"\b(pii|data\s+(?:leak|exposure|privacy|protection|flow|governance))\b", re.IGNORECASE),
         re.compile(r"\bstale\b.{0,20}\b(token|key|secret|credential)\b", re.IGNORECASE),
@@ -839,7 +849,7 @@ _CONTEXT_PATTERNS = [
     ]),
     # Tooling BEFORE Infrastructure — so "tableau MCP server" hits Tooling, not Infra
     ("Tooling", [
-        re.compile(r"\b(github|gitlab|jira|confluence|slack|zoom|teams|zendesk|airtable|zapier|salesforce|pardot|hubspot|mailgun|surveymonkey)\b", re.IGNORECASE),
+        re.compile(r"\b(github|gitlab|jira|confluence|slack|zoom|teams|zendesk|airtable|zapier|salesforce|pardot|hubspot|mailgun|surveymonkey|zoho|sharepoint|firecrawl)\b", re.IGNORECASE),
         re.compile(r"\b(chatgpt|claude|copilot|anthropic|ai\s+license|ai\s+vendor|qms\s+chat\s*bot)\b", re.IGNORECASE),
         re.compile(r"\b(adobe|acrobat|photoshop|illustrator|indesign|creative\s+cloud)\b", re.IGNORECASE),
         re.compile(r"(consolidat|migrat|decommission|integrat)\w*\s+.{0,30}(tool|platform|service|account|license|subscription)", re.IGNORECASE),
